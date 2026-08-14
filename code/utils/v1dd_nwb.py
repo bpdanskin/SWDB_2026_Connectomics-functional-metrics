@@ -302,6 +302,7 @@ def load_lsn_template(
                 "cannot reduce to the grid the RF code was written against"
             )
             out["azimuths"], out["altitudes"] = _grid_degrees(have_c, have_r, grid_size_deg)
+            out.update(_pixel_codes(images))
             return out
 
         fr, fc = have_r // want_r, have_c // want_c
@@ -317,6 +318,7 @@ def load_lsn_template(
                 "cannot be reproduced from this asset"
             )
             out["azimuths"], out["altitudes"] = _grid_degrees(have_c, have_r, grid_size_deg)
+            out.update(_pixel_codes(images))
             return out
 
         images = blocks[:, :, 0, :, 0]
@@ -325,6 +327,32 @@ def load_lsn_template(
     rows, cols = images.shape[1:]
     out["images"] = images
     out["azimuths"], out["altitudes"] = _grid_degrees(cols, rows, grid_size_deg)
+    out.update(_pixel_codes(images))
+    return out
+
+
+def _pixel_codes(images: np.ndarray) -> Dict[str, Any]:
+    """Which pixel value means bright, dark, and background.
+
+    `locally_sparse_noise.py` hard-codes `pixel_on=255`, `pixel_off=0`, `pixel_gray=127`,
+    but this asset encodes the template as **-1 / 0 / 1**. Porting those constants
+    literally makes the ON and OFF design matrices all-False, so every ROI comes out with
+    no receptive field — a silent wrong answer that reads as a biological result rather
+    than a bug. So derive the mapping from the data: brightest is ON, darkest is OFF,
+    the middle value is background.
+    """
+    values = sorted(int(v) for v in np.unique(images))
+    out: Dict[str, Any] = {"pixel_values": values}
+    if len(values) == 3:
+        out["pixel_off"], out["pixel_gray"], out["pixel_on"] = values
+    elif len(values) == 2:                      # no background pixels in this template
+        out["pixel_off"], out["pixel_on"] = values
+        out["pixel_gray"] = None
+    else:
+        out["pixel_off"] = out["pixel_gray"] = out["pixel_on"] = None
+        out["pixel_error"] = (
+            f"expected 2 or 3 distinct pixel values, found {len(values)}: {values[:10]}"
+        )
     return out
 
 
@@ -467,7 +495,10 @@ def schema_report(nwb, planes: Optional[Sequence[int]] = None) -> Dict[str, Any]
             "final_shape": [int(x) for x in lsn["images"].shape[1:]],
             "azimuth_range": [float(lsn["azimuths"][0]), float(lsn["azimuths"][-1])],
             "altitude_range": [float(lsn["altitudes"][0]), float(lsn["altitudes"][-1])],
-            "pixel_values": sorted(int(v) for v in np.unique(lsn["images"])),
+            "pixel_values": lsn.get("pixel_values"),
+            "pixel_on": lsn.get("pixel_on"),
+            "pixel_off": lsn.get("pixel_off"),
+            "pixel_gray": lsn.get("pixel_gray"),
             "rf_viable": bool(lsn["reduced"] or lsn["native_shape"] == (8, 14)),
         }
         if "error" in lsn:
