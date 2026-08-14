@@ -1,6 +1,7 @@
 # Code Ocean specific files and directories
 /data/
 /results/
+/scratch/
 metadata/metadata.yml
 
 # Byte-compiled / optimized / DLL files
