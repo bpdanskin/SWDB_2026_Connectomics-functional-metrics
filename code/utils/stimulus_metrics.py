@@ -74,8 +74,22 @@ class MetricConfig:
     #: from an NWB attribute; the per-trial rows in this asset say stop-start is 1.985 s.
     #: 2.0 reproduces the published numbers. "per_trial" uses each sweep's own duration.
     dg_response_seconds: Any = 2.0
-    #: Natural-images response window, seconds (the original's `duration_sec`).
-    ni_response_seconds: Any = 0.30
+    #: Natural-images response window, seconds. **Recovered empirically, not read from
+    #: the data**: the original took it from an NWB `duration_sec` attribute the current
+    #: files no longer carry. Scanning it against the published table gives a sharp
+    #: optimum at 0.33 s (median |diff| in lifetime_sparseness = 1e-16, i.e. exact),
+    #: while 0.30 s gives 6e-3 and 0.35 s gives 2e-3.
+    #:
+    #: The reason is discrete. At dt = 0.165 s the samples after an onset sit at
+    #: delta, delta+dt, delta+2dt with delta in [0, dt). A 0.33 s window is just under
+    #: 2*dt = 0.33008, so it catches **exactly two samples on every trial**; a 0.30 s
+    #: window catches two when delta <= 0.135 and one otherwise. That varying count
+    #: rescales each trial differently, which `lifetime_sparseness` detects because it
+    #: is invariant to a *global* scale but not a per-trial one.
+    #:
+    #: Note the margin is only 8e-5 s. If dt ever changes, re-run the probe -- or set
+    #: `ni_response_frames=2`, which expresses the same intent and cannot drift.
+    ni_response_seconds: Any = 0.33
     #: If set, natural images uses a FIXED number of imaging samples from each onset
     #: instead of a time window, and `ni_response_seconds` is ignored. The two differ in
     #: how many samples land in a trial: a time window varies with onset phase, a frame
