@@ -1,10 +1,18 @@
-"""Reading V1DD two-photon sessions out of NWB-Zarr.
+"""Reading V1DD two-photon sessions out of NWB.
 
 The `allen_v1dd` analysis code reached into a private Isilon HDF5 tree through
 `OPhysClient`/`OPhysSession`, indexing literal paths like
 `processing/l0_events_plane3/DfOverF/l0_events`. That tree is gone; the same sessions are
-now published as NWB-Zarr. This module is the replacement seam — the only file in the
-port that imports `hdmf_zarr` — so that when the NWB layout changes again, one file moves.
+now published as NWB. This module is the replacement seam — the only file in the port
+that touches `hdmf_zarr` or `pynwb.NWBHDF5IO` — so when the layout changes again, one
+file moves.
+
+**The asset is mixed.** Most sessions are NWB-Zarr directories (`*.nwb.zarr`), but a few
+are plain HDF5 files (`*.nwb`). Globbing only for the former silently drops the latter,
+and the symptom is a shorter session list rather than an error — so use `find_sessions()`
+rather than a bare glob. `open_session()` dispatches on the suffix and both readers hand
+back the same `pynwb.NWBFile`, which is what lets every function below stay
+format-agnostic.
 
 Three differences from the old client are worth knowing before you use this:
 
@@ -26,6 +34,7 @@ so the first job is to find out what is actually there — a function that raise
 first surprise tells you much less than one that describes the whole file.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -36,6 +45,10 @@ import pandas as pd
 __all__ = [
     "PlaneData",
     "open_session",
+    "session",
+    "nwb_format",
+    "find_sessions",
+    "peek_session",
     "list_planes",
     "load_plane",
     "load_stimulus_table",
@@ -86,16 +99,126 @@ class PlaneData:
         return 1.0 / self.dt
 
 
+def nwb_format(path) -> str:
+    """`"zarr"` for a `.nwb.zarr` directory, `"hdf5"` for a plain `.nwb` file."""
+    return "zarr" if str(path).endswith(".nwb.zarr") else "hdf5"
+
+
 def open_session(path):
-    """Open an NWB-Zarr session read-only. Caller owns closing the returned io object.
+    """Open a session read-only, in whichever format it was written.
 
-    Returns `(nwbfile, io)`. Use as a context manager via `io` when looping over
-    sessions; the notebook keeps one open for the interactive path.
+    Most of this asset is NWB-Zarr, but a couple of sessions are plain HDF5 `.nwb`.
+    Both readers return the same `pynwb.NWBFile`, so every caller downstream —
+    `load_plane`, `load_stimulus_table`, `schema_report` — is unaffected by the
+    difference. The only place the two diverge is the underlying array type
+    (`zarr.core.Array` vs `h5py.Dataset`), and both answer `[:]` the same way.
+
+    Returns `(nwbfile, io)`. The caller owns closing `io`; for an HDF5 file that is not
+    optional, since the handle stays open and lazily backs every array you read.
     """
-    from hdmf_zarr import NWBZarrIO
+    path = str(path)
+    if nwb_format(path) == "zarr":
+        from hdmf_zarr import NWBZarrIO
 
-    io = NWBZarrIO(str(path), mode="r")
+        io = NWBZarrIO(path, mode="r")
+    else:
+        from pynwb import NWBHDF5IO
+
+        io = NWBHDF5IO(path, mode="r")
     return io.read(), io
+
+
+@contextmanager
+def session(path):
+    """Context manager yielding an open `NWBFile`, closing the handle on exit.
+
+        with session(p) as nwb:
+            stim = load_stimulus_table(nwb)
+
+    Prefer this over `open_session` in loops. It matters more for HDF5 than for Zarr:
+    an unclosed `NWBHDF5IO` keeps a file handle per session, and on a long loop that
+    reaches the open-file limit.
+    """
+    nwb, io = open_session(path)
+    try:
+        yield nwb
+    finally:
+        io.close()
+
+
+def find_sessions(functional_dir, prefer: str = "zarr") -> List[Path]:
+    """One NWB path per session directory, across both storage formats.
+
+    The asset holds a `.nwb.zarr` directory for most sessions and a plain `.nwb` file for
+    a few. Globbing only for `*.nwb.zarr` silently drops the latter — which is easy to
+    miss, because the result is a shorter session list rather than an error.
+
+    A session with both formats yields one path, `prefer` deciding which. Note that
+    `*.nwb` does not match `*.nwb.zarr` (the name ends in `.zarr`), so the two patterns
+    do not overlap; the explicit filter below only guards against a stray `.nwb` file
+    *inside* a Zarr directory.
+    """
+    root = Path(functional_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(
+            f"{functional_dir} does not exist. On CodeOcean, confirm the functional "
+            "data asset is attached; locally, set SWDB_DATA_ROOT."
+        )
+
+    zarr_paths = sorted(root.glob("*/*.nwb.zarr")) or sorted(root.rglob("*.nwb.zarr"))
+    hdf5_paths = sorted(root.glob("*/*.nwb")) or sorted(root.rglob("*.nwb"))
+    hdf5_paths = [
+        p for p in hdf5_paths if not any(part.endswith(".nwb.zarr") for part in p.parts)
+    ]
+
+    if prefer not in ("zarr", "hdf5"):
+        raise ValueError("prefer must be 'zarr' or 'hdf5'")
+    first, second = (zarr_paths, hdf5_paths) if prefer == "zarr" else (hdf5_paths, zarr_paths)
+
+    by_session: Dict[Path, Path] = {}
+    for p in first:
+        by_session.setdefault(p.parent, p)
+    for p in second:
+        by_session.setdefault(p.parent, p)
+
+    if not by_session:
+        raise FileNotFoundError(f"no *.nwb.zarr or *.nwb found under {functional_dir}")
+    return [by_session[k] for k in sorted(by_session)]
+
+
+def peek_session(path) -> Dict[str, Any]:
+    """Identify a session without loading any traces.
+
+    Reads `(column, volume)` from the ROI table *inside* the file rather than from the
+    directory name, and records which storage format it came from. A file that cannot be
+    opened yields a row with NaN identifiers and an `error` string, so one bad session
+    shortens nothing and is visible in the index.
+    """
+    path = Path(path)
+    info: Dict[str, Any] = {
+        "path": str(path), "name": path.parent.name, "format": nwb_format(path),
+        "column": np.nan, "volume": np.nan, "n_planes": np.nan, "session_id": "",
+        "error": None,
+    }
+    io = None
+    try:
+        nwb, io = open_session(path)
+        planes = list_planes(nwb)
+        info["n_planes"] = len(planes)
+        info["session_id"] = str(nwb.session_id)
+        if planes:
+            rois = nwb.processing[planes[0]]["dff"].rois.to_dataframe()
+            info["column"] = int(pd.to_numeric(rois["column"]).iloc[0])
+            info["volume"] = _as_volume_str(rois["volume"].iloc[0])
+    except Exception as exc:
+        info["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if io is not None:
+            try:
+                io.close()
+            except Exception:
+                pass
+    return info
 
 
 def list_planes(nwb) -> List[str]:
