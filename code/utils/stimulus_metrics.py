@@ -36,6 +36,7 @@ __all__ = [
     "DEFAULT_CONFIG",
     "COLUMN_ORDER",
     "natural_movie_metrics",
+    "natural_images_metrics",
     "drifting_gratings_metrics",
     "surround_suppression_metrics",
     "DGResult",
@@ -382,7 +383,13 @@ def compare_to_published(
                 "tol": tol,
             })
             if m in exact:
-                entry["frac_exact"] = float(np.mean(av == bv))
+                # Relative, not bitwise. `preferred_sf` carries a float32 round-trip
+                # (0.04 arrives as 0.039999999...), so two values agreeing to 16 digits
+                # can still fail `==` and report 0% agreement on a column that is in
+                # fact identical. A genuine category change is a 100% difference, so
+                # nothing real hides under this tolerance.
+                entry["frac_exact"] = float(np.mean(np.isclose(av, bv, rtol=1e-9, atol=0)))
+                entry["frac_exact_bitwise"] = float(np.mean(av == bv))
             if both.sum() > 2 and np.std(av) > 0 and np.std(bv) > 0:
                 entry["pearson_r"] = float(np.corrcoef(av, bv)[0, 1])
         report["metrics"][m] = entry
@@ -712,3 +719,90 @@ def surround_suppression_metrics(
     for k, v in out.items():
         frame[k] = v
     return frame
+
+
+# --------------------------------------------------------------- natural images
+
+
+def natural_images_metrics(
+    plane,
+    trials: pd.DataFrame,
+    spont: Sequence[float],
+    *,
+    ns_type: str = "natural_images",
+    config: MetricConfig = DEFAULT_CONFIG,
+    rng: Optional[np.random.Generator] = None,
+    mouse: str = "M409828",
+) -> pd.DataFrame:
+    """Natural-image metrics: one row per ROI.
+
+    Structurally the same as `natural_movie_metrics` — group trials by condition, take
+    the condition means, find each neuron's preferred one — with two differences that
+    matter:
+
+    * **Conditions are `image_index`, not `image_order`.** `image_order` is the raw
+      presentation slot; `image_index` is the image's identity in the 118-image catalog.
+      `natural_images_12` draws twelve images from that *same* namespace, so its
+      `pref_img` values are a sparse subset of 0..117 (2, 4, 5, ..., 68) rather than
+      0..11. Re-ranking them to 0..11 would look tidier and be wrong.
+    * **`frac_responsive_trials` is a statistical test here**, unlike natural movie's
+      `mean(response > 0)`: the fraction of preferred-image trials whose response beats a
+      bootstrapped spontaneous null at p < 0.05. So this column carries bootstrap noise
+      and should be read against a seed control, not against zero.
+
+    The response window is `config.ni_response_seconds`. The original took it from an NWB
+    `duration_sec` attribute that the current files no longer carry, so it is a recovered
+    parameter rather than a known one — see the window probe in the notebook.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    traces = plane.traces[config.trace_type[ns_type]]
+    window = (0.0, float(config.ni_response_seconds))
+
+    starts = trials["start_time"].to_numpy(dtype=np.float64)
+    img = trials["image_index"].to_numpy()
+    if np.isnan(img).any():
+        raise ValueError(f"{ns_type}: trials contain NaN image_index")
+    img = img.astype(int)
+
+    image_ids = np.unique(img)
+    code = _condition_codes(img, image_ids)
+    n_trials = int(np.bincount(code).max())
+
+    sweeps = tr.sweep_responses(traces, plane.timestamps, starts, window, None)
+    ta = tr.trial_array(sweeps, code, n_trials=n_trials, n_conditions=len(image_ids))
+
+    mean_resp = _nanmean(ta, axis=1)                        # (n_images, n_rois)
+    n_rois = plane.n_rois
+    roi_ix = np.arange(n_rois)
+
+    all_nan = np.all(~np.isfinite(mean_resp), axis=0)
+    pref_idx = np.where(np.isfinite(mean_resp), mean_resp, -np.inf).argmax(axis=0)
+    pref_response = np.where(all_nan, np.nan, mean_resp[pref_idx, roi_ix])
+    pref_img = np.where(all_nan, -1, image_ids[pref_idx])
+
+    null_single = tr.spontaneous_null(
+        traces, plane.timestamps, spont[0], spont[1], window, None,
+        n_boot=config.other_n_boot, n_means=1, rng=rng,
+        memory_budget_mb=config.memory_budget_mb,
+    )
+    pref_trials = ta[pref_idx, :, roi_ix]                   # (n_rois, n_trials)
+    frac = tr.frac_trials_above_null(pref_trials, null_single, p_thresh=config.sig_p_thresh)
+
+    # The multi-trial null averages n_trials draws per bootstrap sample. For
+    # natural_images_12 that is 10,000 x 40 = 400,000 window means -- the heaviest single
+    # call in the pipeline, and the reason spontaneous_null blocks by memory budget.
+    null_multi = tr.spontaneous_null(
+        traces, plane.timestamps, spont[0], spont[1], window, None,
+        n_boot=config.other_n_boot, n_means=n_trials, rng=rng,
+        memory_budget_mb=config.memory_budget_mb,
+    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z_score = (pref_response - null_multi.mean(axis=1)) / null_multi.std(axis=1)
+
+    out = roi_frame(plane, mouse=mouse)
+    out["frac_responsive_trials"] = frac
+    out["lifetime_sparseness"] = _lifetime_sparseness_chunked(ta)
+    out["pref_img"] = pref_img
+    out["pref_response"] = pref_response
+    out["z_score"] = z_score
+    return out
