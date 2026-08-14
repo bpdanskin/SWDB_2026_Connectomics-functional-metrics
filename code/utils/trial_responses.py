@@ -50,6 +50,7 @@ __all__ = [
     "window_bounds",
     "window_means",
     "sweep_responses",
+    "sweep_responses_frames",
     "spontaneous_null",
     "trial_array",
     "frac_trials_above_null",
@@ -173,6 +174,41 @@ def sweep_responses(
 
 
 # ------------------------------------------------------------------ bootstrap null
+
+
+def sweep_responses_frames(
+    traces: np.ndarray,
+    timestamps: np.ndarray,
+    starts: np.ndarray,
+    n_frames: int,
+    offset_frames: int = 0,
+) -> np.ndarray:
+    """Mean of exactly `n_frames` samples from each onset. Returns (n_sweeps, n_rois).
+
+    The *fixed-width* alternative to `sweep_responses`. Where that one takes every sample
+    inside a time window — so the count varies from trial to trial with where the onset
+    falls between samples — this takes the same number of samples every time, starting at
+    the first sample at or after the onset.
+
+    The distinction matters because the two disagree in a way no choice of window length
+    can reconcile. A varying sample count rescales each trial differently, which changes
+    the *relative* pattern of responses across conditions; a fixed count does not. Metrics
+    that are scale-invariant per trial (`lifetime_sparseness`) can therefore tell the two
+    apart even though the mean response looks similar.
+
+    `allen_v1dd` used the varying-width form for trial responses and the fixed-width form
+    for its bootstrap null, so both are needed to reproduce it.
+    """
+    if n_frames < 1:
+        raise ValueError("n_frames must be at least 1")
+    cs, counts = prefix_sums(traces)
+    timestamps = np.asarray(timestamps, dtype=np.float64)
+    starts = np.asarray(starts, dtype=np.float64)
+
+    a = np.searchsorted(timestamps, starts, side="left") + offset_frames
+    a = np.clip(a, 0, len(timestamps))
+    b = np.clip(a + n_frames, 0, len(timestamps))
+    return window_means(cs, counts, a, b)
 
 
 def _nearest_index(timestamps: np.ndarray, value: float) -> int:

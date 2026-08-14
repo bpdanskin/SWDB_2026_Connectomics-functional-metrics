@@ -76,6 +76,12 @@ class MetricConfig:
     dg_response_seconds: Any = 2.0
     #: Natural-images response window, seconds (the original's `duration_sec`).
     ni_response_seconds: Any = 0.30
+    #: If set, natural images uses a FIXED number of imaging samples from each onset
+    #: instead of a time window, and `ni_response_seconds` is ignored. The two differ in
+    #: how many samples land in a trial: a time window varies with onset phase, a frame
+    #: count does not. Because per-trial rescaling changes the relative pattern across
+    #: images, scale-invariant metrics like lifetime_sparseness can distinguish them.
+    ni_response_frames: Optional[int] = None
     #: Natural-movie and LSN windows are counted in *imaging* frames, so they depend on
     #: the plane's own sampling period rather than on the stimulus.
     nm_response_frames: int = 3
@@ -768,7 +774,11 @@ def natural_images_metrics(
     code = _condition_codes(img, image_ids)
     n_trials = int(np.bincount(code).max())
 
-    sweeps = tr.sweep_responses(traces, plane.timestamps, starts, window, None)
+    if config.ni_response_frames is not None:
+        sweeps = tr.sweep_responses_frames(traces, plane.timestamps, starts,
+                                           int(config.ni_response_frames))
+    else:
+        sweeps = tr.sweep_responses(traces, plane.timestamps, starts, window, None)
     ta = tr.trial_array(sweeps, code, n_trials=n_trials, n_conditions=len(image_ids))
 
     mean_resp = _nanmean(ta, axis=1)                        # (n_images, n_rois)
