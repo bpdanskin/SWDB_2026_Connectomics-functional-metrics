@@ -36,6 +36,13 @@ __all__ = [
     "DEFAULT_CONFIG",
     "COLUMN_ORDER",
     "natural_movie_metrics",
+    "drifting_gratings_metrics",
+    "surround_suppression_metrics",
+    "DGResult",
+    "SSI_COLUMNS",
+    "vonmises_two_peak",
+    "vonmises_two_peak_fit",
+    "vonmises_pref_dir",
     "roi_frame",
     "to_published_schema",
     "compare_to_published",
@@ -381,3 +388,327 @@ def compare_to_published(
         report["metrics"][m] = entry
 
     return report
+
+
+# --------------------------------------------------------------- drifting gratings
+
+
+@dataclass
+class DGResult:
+    """Drifting-gratings metrics plus the intermediates surround suppression needs."""
+
+    metrics: pd.DataFrame                 # per-ROI, published column names
+    trial_responses: np.ndarray           # (n_rois, n_dir, n_sf, n_trials), NaN-padded
+    trial_running_speeds: np.ndarray      # (n_dir, n_sf, n_trials) cm/s -- no ROI axis
+    pref_cond_index: np.ndarray           # (n_rois, 2) [dir_idx, sf_idx], -1 if invalid
+    tuning_params: np.ndarray             # (n_rois, n_sf, 6) von Mises, NaN if no fit
+    dir_list: np.ndarray
+    sf_list: np.ndarray
+    blank_responses: np.ndarray           # (n_rois, n_blank)
+
+
+def vonmises_two_peak(x, scale_1, k_1, x0, scale_2, k_2, b):
+    """Two 180-degree-opposed von Mises bumps plus an offset. x is in degrees."""
+    x = np.asarray(x, dtype=np.float64)
+    return (scale_1 * np.exp(k_1 * np.cos(np.deg2rad(x - x0)))
+            + scale_2 * np.exp(k_2 * np.cos(np.deg2rad(x - x0 - 180)))
+            + b)
+
+
+_VONMISES_BOUNDS = (
+    (0, 0, 0, 0, 0, 0),
+    (np.inf, np.inf, 360, np.inf, np.inf, np.inf),
+)
+
+
+def vonmises_two_peak_fit(x, y, p0=(0.1, 1, 180, 0.01, 1, 0.001),
+                          max_fn_calls=(2000, 10000)):
+    """Least-squares fit, or None if it never converges. Mirrors `fit_utils`."""
+    from scipy.optimize import curve_fit
+
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    good = np.isfinite(y)
+    if good.sum() < 6:
+        return None
+    for maxfev in max_fn_calls:
+        try:
+            params, _ = curve_fit(vonmises_two_peak, x[good], y[good], maxfev=maxfev,
+                                  bounds=_VONMISES_BOUNDS, p0=p0)
+            return params
+        except (RuntimeError, ValueError):
+            continue
+    return None
+
+
+def vonmises_pref_dir(params) -> float:
+    """Preferred direction of a fitted curve: whichever of the two peaks is taller.
+
+    Peak height here is baseline-*subtracted* (f(x) - b), matching
+    `vonmises_two_peak_get_amplitude`. Note that `ssi_tuning_fit` then evaluates the
+    curve *including* b -- an inconsistency in the original that we reproduce.
+    """
+    x0 = float(params[2])
+    x1 = (x0 + 180.0) % 360.0
+    a0 = vonmises_two_peak(x0, *params) - params[-1]
+    a1 = vonmises_two_peak(x1, *params) - params[-1]
+    return x0 if a0 > a1 else x1
+
+
+def _ratio(p, q):
+    """The original's `ratio`: **0** when the denominator is 0, not NaN."""
+    q = np.asarray(q, dtype=np.float64)
+    p = np.asarray(p, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(q == 0, 0.0, p / np.where(q == 0, 1.0, q))
+
+
+def _metric_index(a, b):
+    """The SSI index: **NaN** when the denominator is 0, unlike `_ratio`."""
+    s = np.asarray(a, dtype=np.float64) + np.asarray(b, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(s == 0, np.nan, (a - b) / np.where(s == 0, 1.0, s))
+
+
+def _condition_codes(values: np.ndarray, levels: np.ndarray) -> np.ndarray:
+    """Index of each value in `levels`.
+
+    Exact lookup rather than tolerance-based: both sides come from the same column, so a
+    float32 round-trip (0.04 stored as 0.039999999) matches itself.
+    """
+    idx = np.clip(np.searchsorted(levels, values), 0, len(levels) - 1)
+    if not np.array_equal(levels[idx], values):
+        raise ValueError("condition values are not exactly present in the level list")
+    return idx
+
+
+def drifting_gratings_metrics(
+    plane,
+    trials: pd.DataFrame,
+    is_blank: np.ndarray,
+    spont: Sequence[float],
+    running: Optional[Sequence[np.ndarray]] = None,
+    *,
+    dg_type: str = "full",
+    config: MetricConfig = DEFAULT_CONFIG,
+    rng: Optional[np.random.Generator] = None,
+    mouse: str = "M409828",
+) -> "DGResult":
+    """Drifting-gratings metrics for one plane.
+
+    `dg_type` is "full" or "windowed". The computation is identical for both; surround
+    suppression is what compares them.
+
+    Two preferred conditions are computed, deliberately. `preferred_dir`/`preferred_sf` in
+    the published table come from an argmax over `fillna(-1)` responses, while the
+    selectivity indices come from a NaN-skipping argmax with no fill. They disagree only
+    for ROIs whose condition means are NaN. Both are kept, and a divergence warns, because
+    surround suppression keys off the first and `osi`/`dsi` off the second -- a silent
+    divergence would corrupt SSI without touching any drifting-gratings column.
+    """
+    import warnings
+
+    rng = np.random.default_rng() if rng is None else rng
+    family = f"drifting_gratings_{dg_type}"
+    traces = plane.traces[config.trace_type[family]]
+
+    if config.dg_response_seconds == "per_trial":
+        raise NotImplementedError("per-trial windows need a per-sweep window API")
+    window = (0.0, float(config.dg_response_seconds))
+
+    starts = trials["start_time"].to_numpy(dtype=np.float64)
+    sweeps = tr.sweep_responses(traces, plane.timestamps, starts, window, None)
+
+    grat = trials.loc[~is_blank]
+    dir_list = np.sort(grat["direction"].dropna().unique())
+    sf_list = np.sort(grat["spatial_frequency"].dropna().unique())
+    if len(dir_list) != 12:
+        raise ValueError(
+            f"{family}: found {len(dir_list)} directions, expected 12. The orthogonal and "
+            "null directions are hard-coded as (i +/- 3) % 12 and (i + 6) % 12, which "
+            "compute silently wrong values for any other count."
+        )
+    n_dir, n_sf = len(dir_list), len(sf_list)
+
+    d = _condition_codes(grat["direction"].to_numpy(), dir_list)
+    s = _condition_codes(grat["spatial_frequency"].to_numpy(), sf_list)
+    code = d * n_sf + s
+    n_trials = int(np.bincount(code, minlength=n_dir * n_sf).max())
+
+    ta = tr.trial_array(sweeps[~is_blank], code, n_trials=n_trials,
+                        n_conditions=n_dir * n_sf)
+    ta = ta.reshape(n_dir, n_sf, n_trials, plane.n_rois).transpose(3, 0, 1, 2)
+    blank = sweeps[is_blank].T if bool(is_blank.any()) else np.empty((plane.n_rois, 0))
+
+    mean_tr = _nanmean(ta, axis=3)                       # (n_rois, n_dir, n_sf)
+    n_rois = plane.n_rois
+    roi_ix = np.arange(n_rois)
+
+    # published preferred condition: argmax over fillna(-1), C order
+    k_fill = np.nan_to_num(mean_tr, nan=-1.0).reshape(n_rois, -1).argmax(axis=1)
+    pref_dir_fill, pref_sf_fill = np.divmod(k_fill, n_sf)
+
+    # selectivity-index preferred condition: NaN-skipping argmax, no fill
+    k_skip = np.where(np.isfinite(mean_tr), mean_tr, -np.inf).reshape(n_rois, -1).argmax(axis=1)
+    pref_dir_idx, pref_sf_idx = np.divmod(k_skip, n_sf)
+
+    n_diverge = int(np.sum(k_fill != k_skip))
+    if n_diverge:
+        warnings.warn(
+            f"{family}: the two preferred-condition definitions disagree on {n_diverge} "
+            f"of {n_rois} ROIs; SSI uses the fillna(-1) one, osi/dsi the other"
+        )
+
+    pref_cond_index = np.stack([pref_dir_fill, pref_sf_fill], axis=1).astype(int)
+    pref_cond_index[~plane.is_valid] = -1
+
+    tuning = mean_tr[roi_ix, :, pref_sf_idx]             # (n_rois, n_dir) at preferred SF
+    pref = tuning[roi_ix, pref_dir_idx]
+    null_r = tuning[roi_ix, (pref_dir_idx + 6) % 12]
+    orth_r = 0.5 * (tuning[roi_ix, (pref_dir_idx + 3) % 12]
+                    + tuning[roi_ix, (pref_dir_idx - 3) % 12])
+
+    osi = _ratio(pref - orth_r, pref + orth_r)
+    dsi = _ratio(pref - null_r, pref + null_r)
+
+    theta = np.deg2rad(dir_list.astype(float))
+    # gosi normalises with a NaN-PROPAGATING sum, matching `_compute_osi`
+    L_norm = tuning.sum(axis=1)
+    L_ori = tuning @ np.exp(2j * theta)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        gosi = np.abs(np.where(L_norm != 0, L_ori / np.where(L_norm != 0, L_norm, 1.0),
+                               L_ori))
+    # pref_dir_mean treats NaN as ZERO (skipna sum) -- the opposite convention to gosi
+    vec = np.nan_to_num(tuning, nan=0.0) @ np.exp(1j * theta)
+    pref_dir_mean = np.degrees(np.angle(vec)) % 360.0
+
+    lifetime = _lifetime_sparseness_chunked(
+        ta.transpose(1, 2, 3, 0).reshape(-1, n_trials, n_rois))
+
+    null_single = tr.spontaneous_null(
+        traces, plane.timestamps, spont[0], spont[1], window, None,
+        n_boot=config.dg_n_boot, n_means=1, rng=rng,
+        memory_budget_mb=config.memory_budget_mb,
+    )
+    pref_trials = ta[roi_ix, pref_dir_idx, pref_sf_idx, :]        # (n_rois, n_trials)
+    frac = tr.frac_trials_above_null(pref_trials, null_single, p_thresh=config.sig_p_thresh)
+    is_responsive = (plane.is_valid & (frac >= config.dg_frac_thresh)).astype(float)
+
+    # per-trial running speed, shape (n_dir, n_sf, n_trials); no ROI axis
+    trs = np.full((n_dir, n_sf, n_trials), np.nan)
+    if running is not None:
+        speed, rts = running
+        pad = config.running_pad_seconds
+        gstarts = grat["start_time"].to_numpy(dtype=np.float64)
+        stops = grat["stop_time"].to_numpy(dtype=np.float64)
+        cs, counts = tr.prefix_sums(np.asarray(speed, dtype=np.float64)[:, None])
+        a = np.searchsorted(rts, gstarts - pad, side="left")
+        b = np.searchsorted(rts, stops + pad, side="right")
+        per_sweep = tr.window_means(cs, counts, a, b)              # (n_sweeps, 1)
+        trs = tr.trial_array(per_sweep, code, n_trials=n_trials,
+                             n_conditions=n_dir * n_sf).reshape(n_dir, n_sf, n_trials)
+
+    # von Mises fits, one per (ROI, spatial frequency)
+    tuning_params = np.full((n_rois, n_sf, 6), np.nan)
+    if config.fit_tuning_curves:
+        for roi in range(n_rois):
+            if not plane.is_valid[roi]:
+                continue
+            for sf_i in range(n_sf):
+                p = vonmises_two_peak_fit(dir_list, mean_tr[roi, :, sf_i])
+                if p is not None:
+                    tuning_params[roi, sf_i] = p
+
+    out = roi_frame(plane, mouse=mouse)
+    out["dsi"] = dsi
+    out["frac_responsive_trials"] = frac
+    out["gosi"] = gosi
+    out["is_responsive"] = is_responsive
+    out["lifetime_sparseness"] = lifetime
+    out["osi"] = osi
+    out["preferred_dir"] = np.where(pref_cond_index[:, 0] >= 0,
+                                    dir_list[pref_cond_index[:, 0]], np.nan)
+    out["preferred_sf"] = np.where(pref_cond_index[:, 1] >= 0,
+                                   sf_list[pref_cond_index[:, 1]], np.nan)
+    out["pref_dir_mean"] = pref_dir_mean
+
+    return DGResult(metrics=out, trial_responses=ta, trial_running_speeds=trs,
+                    pref_cond_index=pref_cond_index, tuning_params=tuning_params,
+                    dir_list=dir_list, sf_list=sf_list, blank_responses=blank)
+
+
+# ------------------------------------------------------------ surround suppression
+
+
+SSI_COLUMNS = ["ssi", "ssi_avg", "ssi_avg_at_pref_sf", "ssi_running",
+               "ssi_running_avg_at_pref_sf", "ssi_stationary",
+               "ssi_stationary_avg_at_pref_sf", "ssi_tuning_fit"]
+
+
+def surround_suppression_metrics(
+    dgw: "DGResult",
+    dgf: "DGResult",
+    plane,
+    *,
+    config: MetricConfig = DEFAULT_CONFIG,
+    mouse: str = "M409828",
+) -> pd.DataFrame:
+    """Eight surround-suppression indices, all of the form (W - F) / (W + F).
+
+    W is the windowed (small-patch) response and F the full-field response. The
+    **reference condition is always the windowed stimulus's preferred (direction, SF)**;
+    the full-field response is sampled at that same condition, never at its own preferred
+    one. ROIs whose preferred condition is -1 stay NaN.
+
+    Running and stationary trials split at exactly 1 cm/s with **strict** inequalities on
+    both sides, so a trial at exactly 1.0 belongs to neither. `ssi_running` and
+    `ssi_stationary` additionally require at least three qualifying trials in *both*
+    stimuli; the `*_avg_at_pref_sf` variants have no such minimum.
+    """
+    n_rois = plane.n_rois
+    out = {m: np.full(n_rois, np.nan) for m in SSI_COLUMNS}
+
+    thr = config.running_threshold_cm_s
+    W, F = dgw.trial_responses, dgf.trial_responses
+    W_run = np.where((dgw.trial_running_speeds > thr)[None], W, np.nan)
+    W_stat = np.where((dgw.trial_running_speeds < thr)[None], W, np.nan)
+    F_run = np.where((dgf.trial_running_speeds > thr)[None], F, np.nan)
+    F_stat = np.where((dgf.trial_running_speeds < thr)[None], F, np.nan)
+
+    def m(x):
+        """nan-mean that returns NaN for an all-NaN slice instead of warning."""
+        finite = np.isfinite(x)
+        return np.nan if not finite.any() else float(np.mean(x[finite]))
+
+    for roi in range(n_rois):
+        di, si = dgw.pref_cond_index[roi]
+        if di < 0 or si < 0:
+            continue
+
+        out["ssi"][roi] = _metric_index(m(W[roi, di, si]), m(F[roi, di, si]))
+        out["ssi_avg"][roi] = _metric_index(m(W[roi]), m(F[roi]))
+        out["ssi_avg_at_pref_sf"][roi] = _metric_index(m(W[roi, :, si]), m(F[roi, :, si]))
+        out["ssi_running_avg_at_pref_sf"][roi] = _metric_index(
+            m(W_run[roi, :, si]), m(F_run[roi, :, si]))
+        out["ssi_stationary_avg_at_pref_sf"][roi] = _metric_index(
+            m(W_stat[roi, :, si]), m(F_stat[roi, :, si]))
+
+        for key, wa, fa in (("ssi_stationary", W_stat, F_stat),
+                            ("ssi_running", W_run, F_run)):
+            ws, fs = wa[roi, di, si], fa[roi, di, si]
+            ws, fs = ws[np.isfinite(ws)], fs[np.isfinite(fs)]
+            if len(ws) >= config.ssi_min_trials and len(fs) >= config.ssi_min_trials:
+                out[key][roi] = _metric_index(ws.mean(), fs.mean())
+
+        wp, fp = dgw.tuning_params[roi, si], dgf.tuning_params[roi, si]
+        if np.isfinite(wp).all() and np.isfinite(fp).all():
+            d0 = vonmises_pref_dir(wp)
+            # evaluated WITH the fitted baseline b, matching compute_ssi_from_h5 --
+            # inconsistent with the pref-dir selection above, which subtracts it
+            out["ssi_tuning_fit"][roi] = _metric_index(
+                float(vonmises_two_peak(d0, *wp)), float(vonmises_two_peak(d0, *fp)))
+
+    frame = roi_frame(plane, mouse=mouse)
+    for k, v in out.items():
+        frame[k] = v
+    return frame
