@@ -5,12 +5,20 @@ names the historical `data_frames/*_M409828.csv` tables use, so a regenerated ta
 drops in where the old one was. Comparing against those tables is
 `validation/compare.py`'s job, not this module's.
 
-**These reproduce the original, bugs included.** Where the original does something
-defensible-but-wrong, the behaviour is kept and named in a `MetricConfig` flag, so the
-published numbers stay reachable and the corrected version is one argument away. The
-alternative — quietly fixing things — would make every disagreement with the published
-table ambiguous between "we fixed a bug" and "we introduced one", which destroys the only
-validation signal available.
+**The defaults compute the right thing; `REFERENCE_CONFIG` reproduces the historical
+tables.** Every place the original did something defensible-but-wrong is named in a
+`MetricConfig` flag, and both behaviours stay reachable.
+
+That ordering was reversed during the port, deliberately. Matching first is what made the
+port checkable: if corrections had gone in alongside the translation, every disagreement
+with the historical tables would have been ambiguous between "we fixed a bug" and "we
+introduced one", and there would have been no signal left to validate against. Only once
+all seven families matched did the known defects get corrected — so each correction is a
+single, isolated, measurable change rather than part of a fog.
+
+The two that changed the numbers are documented on the flags below. Neither is subtle:
+receptive-field centres were compressed by a constant factor, and preferred condition
+reported condition 0 for ROIs that had no response at all.
 
 Three facts about the original that are easy to get wrong, all verified against the data:
 
@@ -35,6 +43,7 @@ import trial_responses as tr
 __all__ = [
     "MetricConfig",
     "DEFAULT_CONFIG",
+    "REFERENCE_CONFIG",
     "OUTPUT_COLUMNS",
     "natural_movie_metrics",
     "natural_images_metrics",
@@ -54,10 +63,12 @@ __all__ = [
 
 @dataclass(frozen=True)
 class MetricConfig:
-    """Knobs, defaulted to reproduce the published tables.
+    """Knobs, defaulted to computing the right thing.
 
-    The `*_bug` flags exist so that "match the published numbers" and "compute the right
-    thing" are both reachable, and which one you asked for is written down.
+    Three defaults differ from what reproduces the historical tables — `rf_center_scale_bug`,
+    `pref_cond_fillna` and `ni_response_frames` — and each is documented where it is
+    declared. `REFERENCE_CONFIG` is the historical set, so both behaviours are one
+    argument away and which one you asked for is written down rather than inferred.
     """
 
     # --- trace type per family; events everywhere except receptive fields
@@ -88,15 +99,27 @@ class MetricConfig:
     #: rescales each trial differently, which `lifetime_sparseness` detects because it
     #: is invariant to a *global* scale but not a per-trial one.
     #:
-    #: Note the margin is only 8e-5 s. If dt ever changes, re-run the probe -- or set
-    #: `ni_response_frames=2`, which expresses the same intent and cannot drift.
+    #: Used only when `ni_response_frames` is None. Kept because it is what reproduces
+    #: the historical tables — see `REFERENCE_CONFIG` — and because the reasoning above
+    #: is the evidence for `ni_response_frames = 2`.
+    #:
+    #: **It does not generalise.** The margin is 8e-5 s, and the pre-flight found dt
+    #: spanning 0.16123-0.16671 across the 25 sessions. 0.33 s catches exactly two
+    #: samples only where 2*dt lands just above it — dt 0.16504 and 0.16506, which are
+    #: precisely the two sessions the value was recovered on. Elsewhere it takes three
+    #: samples on up to 4.7 % of trials or one on up to 2.1 %, reintroducing exactly the
+    #: per-trial rescaling described above.
     ni_response_seconds: Any = 0.33
-    #: If set, natural images uses a FIXED number of imaging samples from each onset
-    #: instead of a time window, and `ni_response_seconds` is ignored. The two differ in
-    #: how many samples land in a trial: a time window varies with onset phase, a frame
-    #: count does not. Because per-trial rescaling changes the relative pattern across
-    #: images, scale-invariant metrics like lifetime_sparseness can distinguish them.
-    ni_response_frames: Optional[int] = None
+    #: Natural-images response window as a FIXED number of imaging samples from each
+    #: onset. When set (the default), `ni_response_seconds` is ignored.
+    #:
+    #: Two samples, because that is what the 0.33 s window was doing on the sessions it
+    #: was tuned against — but expressed in the units the intent actually lives in, so it
+    #: cannot drift with the sampling rate. A time window varies with onset phase; a
+    #: frame count does not. Since per-trial rescaling changes the relative pattern across
+    #: images, scale-invariant metrics like `lifetime_sparseness` can tell the two apart,
+    #: which is how the discrepancy was found in the first place.
+    ni_response_frames: Optional[int] = 2
     #: Natural-movie and LSN windows are counted in *imaging* frames, so they depend on
     #: the plane's own sampling period rather than on the stimulus.
     nm_response_frames: int = 3
@@ -122,14 +145,42 @@ class MetricConfig:
     chisq_shuffles: int = 0
     fit_tuning_curves: bool = True
 
-    # --- bug compatibility (True == reproduce the published numbers)
-    rf_center_scale_bug: bool = True
-    pref_cond_fillna: bool = True
+    # --- historical compatibility. These default to the CORRECTED behaviour; set both
+    # True — or just use REFERENCE_CONFIG — to reproduce the historical tables exactly.
+    #: `point_to_alt_azi` in the original divides the centre-to-centre *range* by `n`
+    #: rather than `n - 1`, so its degree scale is compressed by `(n-1)/n`: 12.5 % in
+    #: altitude (8 rows) and 7.1 % in azimuth (14 columns). The historical tables
+    #: therefore span ±28.481° and ±56.132° where the screen actually spans ±32.55° and
+    #: ±60.45°. Shipping the compressed scale means anyone who plots retinotopy plots it
+    #: wrong, so the default is the true mapping. The two differ by exactly `n/(n-1)`,
+    #: which is what makes the correction verifiable rather than merely asserted.
+    rf_center_scale_bug: bool = False
+    #: The original takes `preferred_dir`/`preferred_sf` from `fillna(-1).argmax`, so an
+    #: ROI with no finite response at any condition reports condition **0** rather than
+    #: "no preferred condition" — while every other metric in the same function uses a
+    #: nan-skipping argmax. False makes the two agree and leaves those ROIs NaN. It
+    #: touches only all-NaN rows, but surround suppression keys off the preferred
+    #: condition, so a fabricated preference propagates.
+    pref_cond_fillna: bool = False
 
     memory_budget_mb: float = 64.0
 
 
 DEFAULT_CONFIG = MetricConfig()
+
+#: The settings that reproduce the historical `data_frames` tables, defects and all.
+#:
+#: This exists so that "does this pipeline still match the original?" stays a question you
+#: can ask in one line, after the defaults moved on to computing the right thing. The
+#: validation notebook runs both: this one to prove the port is still faithful, the
+#: defaults to produce what ships, and the difference between them is then a specific,
+#: measurable quantity rather than an unexplained disagreement.
+REFERENCE_CONFIG = MetricConfig(
+    rf_center_scale_bug=True,      # centres compressed by (n-1)/n
+    pref_cond_fillna=True,         # all-NaN ROIs report condition 0
+    ni_response_frames=None,       # fall back to the recovered time window
+    ni_response_seconds=0.33,
+)
 
 
 #: Published column names and order, per output file. `surround_supression_index` keeps
@@ -530,7 +581,7 @@ def drifting_gratings_metrics(
     n_rois = plane.n_rois
     roi_ix = np.arange(n_rois)
 
-    # published preferred condition: argmax over fillna(-1), C order
+    # Historical preferred condition: argmax over fillna(-1), C order.
     k_fill = np.nan_to_num(mean_tr, nan=-1.0).reshape(n_rois, -1).argmax(axis=1)
     pref_dir_fill, pref_sf_fill = np.divmod(k_fill, n_sf)
 
@@ -545,8 +596,20 @@ def drifting_gratings_metrics(
             f"of {n_rois} ROIs; SSI uses the fillna(-1) one, osi/dsi the other"
         )
 
-    pref_cond_index = np.stack([pref_dir_fill, pref_sf_fill], axis=1).astype(int)
+    # Which definition `preferred_dir`/`preferred_sf` and surround suppression use.
+    #
+    # Neither argmax abstains: `fillna(-1)` and the `-inf` fill both return index 0 for an
+    # ROI with no finite response at any condition, so both invent a preference where
+    # there is no evidence of one. Correcting the choice of definition is therefore not
+    # enough — those ROIs have to be marked as having no preferred condition, which is
+    # what `-1` means here and what makes `preferred_dir` come out NaN.
+    k_pref = k_fill if config.pref_cond_fillna else k_skip
+    pref_dir_pref, pref_sf_pref = np.divmod(k_pref, n_sf)
+    pref_cond_index = np.stack([pref_dir_pref, pref_sf_pref], axis=1).astype(int)
     pref_cond_index[~plane.is_valid] = -1
+    if not config.pref_cond_fillna:
+        no_response = ~np.isfinite(mean_tr).any(axis=(1, 2))
+        pref_cond_index[no_response] = -1
 
     tuning = mean_tr[roi_ix, :, pref_sf_idx]             # (n_rois, n_dir) at preferred SF
     pref = tuning[roi_ix, pref_dir_idx]

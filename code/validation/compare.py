@@ -18,13 +18,124 @@ Two rules that are easy to get wrong and expensive to debug:
 floor. Without it, every stochastic metric looks broken.
 """
 
+import glob
 import os
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
-__all__ = ["load_reference", "compare_tables", "agreement_table"]
+__all__ = ["load_reference", "compare_tables", "agreement_table",
+           "read_output_csv", "diff_tables", "diff_run_dirs"]
+
+KEYS = ["column", "volume", "plane", "roi"]
+
+
+def read_output_csv(path: str) -> pd.DataFrame:
+    """Read one of this pipeline's CSVs back exactly as written.
+
+    Two settings that are not optional. `volume` as a string, because volumes run 1-9 and
+    a-f and a CSV round-trip re-infers `int` for an all-numeric column. And
+    `float_precision="round_trip"`, because pandas' default C parser is **off by one ULP**
+    — comparing a file against itself through the default reader reports roughly a third
+    of float values as changed.
+    """
+    return pd.read_csv(path, dtype={"volume": str}, float_precision="round_trip")
+
+
+def diff_tables(a: pd.DataFrame, b: pd.DataFrame, keys: Sequence[str] = KEYS,
+                atol: float = 0.0) -> Dict[str, Any]:
+    """Column-level differences between two versions of the same table.
+
+    Answers the question a refactor gate actually asks — *which* columns moved and by how
+    much — rather than "are these files identical", which tells you nothing about where to
+    look. `atol=0` means bit-for-bit; raise it when a change is expected to be numerical.
+    """
+    keys = list(keys)
+    report: Dict[str, Any] = {
+        "n_a": int(len(a)), "n_b": int(len(b)),
+        "only_in_a": [c for c in a.columns if c not in b.columns],
+        "only_in_b": [c for c in b.columns if c not in a.columns],
+        "identical": [], "changed": {},
+    }
+    # Normalise the join keys before merging. Two readings of the same CSV can disagree on
+    # integer width -- a scalar column comes back int64 while an arange-derived one is
+    # int32 on Windows -- and pandas raises "Buffer dtype mismatch" rather than joining.
+    a, b = a.copy(), b.copy()
+    for frame in (a, b):
+        if "volume" in frame:
+            frame["volume"] = frame["volume"].astype(str)
+        for k in ("column", "plane", "roi"):
+            if k in frame:
+                frame[k] = frame[k].astype("int64")
+
+    merged = a.merge(b, on=keys, how="outer", suffixes=("__a", "__b"), indicator=True)
+    report["n_joined"] = int((merged["_merge"] == "both").sum())
+    report["rows_only_a"] = int((merged["_merge"] == "left_only").sum())
+    report["rows_only_b"] = int((merged["_merge"] == "right_only").sum())
+
+    for column in [c for c in a.columns if c in b.columns and c not in keys]:
+        x, y = merged[f"{column}__a"], merged[f"{column}__b"]
+        numeric = pd.api.types.is_numeric_dtype(x) and pd.api.types.is_numeric_dtype(y)
+        if numeric:
+            xv, yv = x.to_numpy(dtype=float), y.to_numpy(dtype=float)
+            both_nan = np.isnan(xv) & np.isnan(yv)
+            differs = ~(np.isclose(xv, yv, rtol=0, atol=atol, equal_nan=True))
+            differs &= ~both_nan
+            if not differs.any():
+                report["identical"].append(column)
+                continue
+            d = np.abs(xv[differs] - yv[differs])
+            report["changed"][column] = {
+                "n_differing": int(differs.sum()),
+                "frac_differing": float(differs.mean()),
+                "max_abs_diff": float(np.nanmax(d)) if np.isfinite(d).any() else None,
+                "median_abs_diff": float(np.nanmedian(d)) if np.isfinite(d).any() else None,
+                "n_nan_mismatch": int((np.isnan(xv) != np.isnan(yv)).sum()),
+            }
+        else:
+            differs = x.astype(str).to_numpy() != y.astype(str).to_numpy()
+            if not differs.any():
+                report["identical"].append(column)
+            else:
+                report["changed"][column] = {"n_differing": int(differs.sum()),
+                                             "frac_differing": float(differs.mean()),
+                                             "dtype": "non-numeric"}
+    return report
+
+
+def diff_run_dirs(old: str, new: str, keys: Sequence[str] = KEYS,
+                  atol: float = 0.0, pattern: str = "*.csv") -> Dict[str, Any]:
+    """Compare every table in two run directories.
+
+    Run directories are stamped precisely so this is possible: a re-run that overwrote its
+    predecessor would leave nothing to compare, and "did that change the numbers?" would
+    become unanswerable rather than merely unanswered.
+    """
+    def names(d):
+        return {os.path.basename(p) for p in glob.glob(os.path.join(d, pattern))}
+
+    shared = sorted(names(old) & names(new))
+    report: Dict[str, Any] = {
+        "old": old, "new": new,
+        "only_in_old": sorted(names(old) - names(new)),
+        "only_in_new": sorted(names(new) - names(old)),
+        "files": {},
+    }
+    for name in shared:
+        report["files"][name] = diff_tables(
+            read_output_csv(os.path.join(old, name)),
+            read_output_csv(os.path.join(new, name)), keys=keys, atol=atol)
+    report["summary"] = {
+        "n_files": len(shared),
+        "files_identical": sorted(n for n, r in report["files"].items()
+                                  if not r["changed"] and not r["only_in_a"]
+                                  and not r["only_in_b"]),
+        "files_changed": sorted(n for n, r in report["files"].items() if r["changed"]),
+        "files_schema_changed": sorted(n for n, r in report["files"].items()
+                                       if r["only_in_a"] or r["only_in_b"]),
+    }
+    return report
 
 
 def load_reference(reference_dir: str, family: str, mouse: str = "M409828") -> pd.DataFrame:
@@ -48,6 +159,7 @@ def compare_tables(
     keys: Sequence[str] = ("column", "volume", "plane", "roi"),
     exact: Sequence[str] = (),
     tol: float = 1e-9,
+    rtol: float = 1e-6,
 ) -> Dict[str, Any]:
     """Per-metric agreement between a regenerated table and the published one.
 
@@ -96,6 +208,12 @@ def compare_tables(
             av, bv = a[both].to_numpy(), b[both].to_numpy()
             diff = np.abs(av - bv)
             entry.update({
+                # Relative agreement, and it is the one to read. `frac_within_tol` uses an
+                # ABSOLUTE 1e-9, which on a 0-360 quantity like pref_dir_mean reports
+                # near-perfect agreement as ~0 % -- the port agrees with the reference to
+                # about 1e-6 relative, which is summation order, not a defect.
+                "frac_within_rtol": float(np.mean(np.isclose(av, bv, rtol=rtol, atol=0.0))),
+                "rtol": rtol,
                 "max_abs_diff": float(diff.max()),
                 "median_abs_diff": float(np.median(diff)),
                 "p95_abs_diff": float(np.percentile(diff, 95)),

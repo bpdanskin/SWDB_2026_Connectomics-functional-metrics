@@ -92,12 +92,29 @@ check("has_rf_on_or_off is the OR", bool(out.has_rf_on_or_off[0]))
 check("no-RF ROIs get NaN centres", bool(np.isnan(out.azimuth_rf_on[1])))
 
 print("\n[2] the centre lands on the driving pixel")
+# The default mapping is now the corrected one -- interpolation into the real pixel
+# centres -- so the driving pixel's centre is exactly `altitudes[TARGET_R]`.
+check("altitude matches the target pixel",
+      abs(out.altitude_rf_on[0] - altitudes[TARGET_R]) < 1e-9,
+      f"{out.altitude_rf_on[0]:.4f} vs {altitudes[TARGET_R]:.4f}")
+check("azimuth matches the target pixel",
+      abs(out.azimuth_rf_on[0] - azimuths[TARGET_C]) < 1e-9,
+      f"{out.azimuth_rf_on[0]:.4f} vs {azimuths[TARGET_C]:.4f}")
+
+# ...and the historical config still lands where the old tables put it.
+hist = sm.receptive_field_metrics(
+    plane, trials, (spont_start, spont_stop), lsn,
+    config=sm.MetricConfig(other_n_boot=2000, rf_center_scale_bug=True),
+    rng=np.random.default_rng(0))
 exp_alt = (TARGET_R + 0.5) * ((altitudes[-1] - altitudes[0]) / ROWS) + altitudes[0]
 exp_azi = (TARGET_C + 0.5) * ((azimuths[-1] - azimuths[0]) / COLS) + azimuths[0]
-check("altitude matches the target pixel", abs(out.altitude_rf_on[0] - exp_alt) < 1e-9,
-      f"{out.altitude_rf_on[0]:.4f} vs {exp_alt:.4f}")
-check("azimuth matches the target pixel", abs(out.azimuth_rf_on[0] - exp_azi) < 1e-9,
-      f"{out.azimuth_rf_on[0]:.4f} vs {exp_azi:.4f}")
+check("historical config reproduces the compressed centre",
+      abs(hist.altitude_rf_on[0] - exp_alt) < 1e-9
+      and abs(hist.azimuth_rf_on[0] - exp_azi) < 1e-9,
+      f"{hist.altitude_rf_on[0]:.4f} vs {exp_alt:.4f}")
+check("corrected == historical * n/(n-1), on real metric output not just the helper",
+      abs(out.altitude_rf_on[0] - hist.altitude_rf_on[0] * (ROWS / (ROWS - 1))) < 1e-9
+      and abs(out.azimuth_rf_on[0] - hist.azimuth_rf_on[0] * (COLS / (COLS - 1))) < 1e-9)
 
 print("\n[3] the point_to_alt_azi scale bug, reproduced on purpose")
 # a centroid on the LAST pixel is the sharpest test: the published tables span
@@ -115,14 +132,10 @@ check("corrected azimuth is the true 60.45",
 check("the ratio is exactly (n-1)/n",
       abs(last_alt_bug / 32.55 - 7 / 8) < 1e-9 and abs(last_azi_bug / 60.45 - 13 / 14) < 1e-9,
       f"alt {last_alt_bug / 32.55:.6f} (7/8), azi {last_azi_bug / 60.45:.6f} (13/14)")
-fixed = sm.receptive_field_metrics(plane, trials, (spont_start, spont_stop), lsn,
-                                   config=sm.MetricConfig(other_n_boot=2000,
-                                                          rf_center_scale_bug=False),
-                                   rng=np.random.default_rng(0))
 check("the flag changes the centres but not which ROIs have an RF",
-      np.array_equal(out.has_rf_on.to_numpy(), fixed.has_rf_on.to_numpy())
-      and abs(out.altitude_rf_on[0] - fixed.altitude_rf_on[0]) > 1e-6,
-      f"{out.altitude_rf_on[0]:.4f} vs {fixed.altitude_rf_on[0]:.4f}")
+      np.array_equal(out.has_rf_on.to_numpy(), hist.has_rf_on.to_numpy())
+      and abs(out.altitude_rf_on[0] - hist.altitude_rf_on[0]) > 1e-6,
+      f"corrected {out.altitude_rf_on[0]:.4f} vs historical {hist.altitude_rf_on[0]:.4f}")
 
 print("\n[4] the pixel encoding, which is where a literal port breaks")
 wrong = dict(lsn, pixel_on=255, pixel_off=0)      # the original's hard-coded constants

@@ -58,7 +58,11 @@ plane = vn.PlaneData(mouse_id="409828", depth_um=150.0, column=1, volume="3", pl
                      is_valid=np.ones(N_ROIS, bool), timestamps=ts,
                      traces={"events": traces}, roi_table=roi_table, dt=DT)
 
-cfg = sm.MetricConfig(ni_response_seconds=WINDOW, other_n_boot=2000)
+# ni_response_frames=None so the *seconds* knob is live: the default is now a fixed
+# 2-sample window, which ignores ni_response_seconds entirely. Sections that probe the
+# time window have to opt back into it.
+cfg = sm.MetricConfig(ni_response_seconds=WINDOW, ni_response_frames=None,
+                      other_n_boot=2000)
 
 print("[1] natural_images_metrics")
 out = sm.natural_images_metrics(plane, trials, (spont_start, spont_stop),
@@ -109,7 +113,8 @@ check("but pref_img does not", np.array_equal(out.pref_img, other.pref_img))
 print("\n[4] the response window actually matters (so probing it is meaningful)")
 short = sm.natural_images_metrics(
     plane, trials, (spont_start, spont_stop),
-    config=sm.MetricConfig(ni_response_seconds=0.25, other_n_boot=2000),
+    config=sm.MetricConfig(ni_response_seconds=0.25, ni_response_frames=None,
+                           other_n_boot=2000),
     rng=np.random.default_rng(0))
 # A flat within-sweep response is window-invariant, so the probe can only discriminate
 # where the trace has structure inside the window -- which sparse events do.
@@ -130,11 +135,28 @@ check("candidate windows put different sample counts in each trial",
 
 wide = sm.natural_images_metrics(
     plane, trials, (spont_start, spont_stop),
-    config=sm.MetricConfig(ni_response_seconds=0.40, other_n_boot=2000),
+    config=sm.MetricConfig(ni_response_seconds=0.40, ni_response_frames=None,
+                           other_n_boot=2000),
     rng=np.random.default_rng(0))
 check("a well-separated window changes the sparse-event ROI's response",
       abs(out.pref_response[4] - wide.pref_response[4]) > 1e-6,
       f"{out.pref_response[4]:.5f} at 0.30 s vs {wide.pref_response[4]:.5f} at 0.40 s")
+
+print("\n[4b] the shipped window is counted in frames, so seconds is inert")
+same = [sm.natural_images_metrics(
+            plane, trials, (spont_start, spont_stop),
+            config=sm.MetricConfig(ni_response_frames=2, ni_response_seconds=w,
+                                   other_n_boot=2000),
+            rng=np.random.default_rng(0)).pref_response.to_numpy()
+        for w in (0.10, 9.99)]
+check("ni_response_seconds has no effect once frames is set",
+      np.array_equal(same[0], same[1], equal_nan=True),
+      "0.10 s and 9.99 s give identical results -- both ignored")
+three = sm.natural_images_metrics(
+    plane, trials, (spont_start, spont_stop),
+    config=sm.MetricConfig(ni_response_frames=3, other_n_boot=2000),
+    rng=np.random.default_rng(0)).pref_response.to_numpy()
+check("but the frame count does", not np.array_equal(same[0], three, equal_nan=True))
 
 print("\n[5] guardrails and schema")
 bad = trials.copy()
