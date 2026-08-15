@@ -177,7 +177,11 @@ def compare_tables(
     for frame in (left, right):
         frame["volume"] = frame["volume"].astype(str)
         for k in ("column", "plane", "roi"):
-            frame[k] = frame[k].astype(int)
+            # int64 explicitly, not `int`: on Windows under numpy 1.x that is int32, and
+            # merging an int32 key against an int64 one raises "Buffer dtype mismatch"
+            # rather than joining. The capsule is 64-bit Linux and never sees it, which is
+            # exactly what makes it worth pinning.
+            frame[k] = frame[k].astype("int64")
 
     merged = left.merge(right, on=keys, how="inner", suffixes=("_new", "_pub"))
     only_new = len(left) - len(merged)
@@ -205,7 +209,13 @@ def compare_tables(
             "n_pub_only_finite": int((~a.notna() & b.notna()).sum()),
         }
         if both.sum():
-            av, bv = a[both].to_numpy(), b[both].to_numpy()
+            # float64, not whatever the column happened to be. `pd.to_numeric` leaves a
+            # boolean column boolean, and numpy refuses `True - False` outright:
+            #     TypeError: numpy boolean subtract ... use bitwise_xor
+            # Three of the receptive-field columns are boolean, so every caller comparing
+            # them would otherwise have to remember to cast first.
+            av = a[both].to_numpy(dtype=np.float64)
+            bv = b[both].to_numpy(dtype=np.float64)
             diff = np.abs(av - bv)
             entry.update({
                 # Relative agreement, and it is the one to read. `frac_within_tol` uses an
