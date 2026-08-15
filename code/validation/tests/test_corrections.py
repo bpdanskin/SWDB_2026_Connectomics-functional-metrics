@@ -83,6 +83,67 @@ check("both fabricate index 0 for the all-NaN ROI -- which is the actual defect"
 no_response = ~np.isfinite(mean_tr).any(axis=(1, 2))
 check("the all-NaN ROI is the one that gets marked -1", list(no_response) == [False, False, True])
 
+print("\n[2b] ...and the flag is actually wired into drifting_gratings_metrics")
+# This is the check that matters. The ingredients above were already right when the flag
+# was dead code, so testing them proves nothing about whether it is connected. On the two
+# coregistered sessions the correction changes zero ROIs -- every condition has all 8
+# trials, so no mean is ever NaN -- which means real data cannot distinguish "wired" from
+# "still dead". Only a fixture with a genuinely unresponsive ROI can.
+DIRS, SFS = np.arange(0, 360, 30).astype(float), np.array([0.04, 0.08])
+DT, PERIOD, N_R = 0.16504, 3.0, 3
+rng = np.random.default_rng(0)
+combos = [(d, s) for d in range(12) for s in range(2)] * 8
+rng.shuffle(combos)
+rows, t = [], 50.0
+for d, s in combos:
+    rows.append({"stim_name": "dg", "start_time": t, "stop_time": t + 1.985,
+                 "direction": DIRS[d], "spatial_frequency": SFS[s],
+                 "temporal_frequency": 1.0})
+    t += PERIOD
+dg_trials = pd.DataFrame(rows)
+dg_blank = np.zeros(len(dg_trials), bool)
+sp0, sp1 = t + 10.0, t + 310.0
+ts = np.arange(0.0, sp1 + 20.0, DT)
+traces = np.zeros((len(ts), N_R))
+for _, r in dg_trials.iterrows():
+    w = (ts >= r["start_time"]) & (ts <= r["start_time"] + 2.0)
+    traces[w, 0] = 1.0 + np.cos(np.deg2rad(r["direction"]))     # tuned
+    traces[w, 1] = 0.5                                          # flat but present
+traces[ts >= sp0] = rng.gamma(1.0, 0.1, size=(int((ts >= sp0).sum()), N_R))
+traces[:, 2] = np.nan          # ROI 2: no finite response anywhere, ever
+
+roi_table = pd.DataFrame({"column": 1, "volume": 3, "plane": 0,
+                          "roi": np.arange(N_R), "pika_roi_confidence": 0.9})
+dg_plane = vn.PlaneData(mouse_id="409828", depth_um=150.0, column=1, volume="3", plane=0,
+                        roi=np.arange(N_R), is_valid=np.ones(N_R, bool), timestamps=ts,
+                        traces={"events": traces}, roi_table=roi_table, dt=DT)
+rts = np.arange(0.0, sp1 + 20.0, 1 / 60)
+running = (np.zeros_like(rts), rts)
+
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    got = {}
+    for label, conf in (("corrected", sm.MetricConfig(fit_tuning_curves=False, dg_n_boot=200)),
+                        ("historical", sm.MetricConfig(fit_tuning_curves=False, dg_n_boot=200,
+                                                       pref_cond_fillna=True))):
+        got[label] = sm.drifting_gratings_metrics(
+            dg_plane, dg_trials, dg_blank, (sp0, sp1), running,
+            dg_type="windowed", config=conf, rng=np.random.default_rng(0)).metrics
+
+check("historical: the unresponsive ROI reports direction 0, invented from nothing",
+      got["historical"]["preferred_dir"].iloc[2] == DIRS[0],
+      str(got["historical"]["preferred_dir"].iloc[2]))
+check("corrected: the unresponsive ROI reports NaN",
+      bool(np.isnan(got["corrected"]["preferred_dir"].iloc[2])),
+      str(got["corrected"]["preferred_dir"].iloc[2]))
+check("corrected: its preferred_sf is NaN too",
+      bool(np.isnan(got["corrected"]["preferred_sf"].iloc[2])))
+check("responsive ROIs are untouched by the flag",
+      got["corrected"]["preferred_dir"].iloc[:2].equals(
+          got["historical"]["preferred_dir"].iloc[:2]),
+      f"{got['corrected']['preferred_dir'].iloc[:2].tolist()}")
+
 print("\n[3] natural-images window: two samples at every sampling rate")
 # The three dt values that matter, from the pre-flight: the extremes of the asset and the
 # one the 0.33 s window was recovered on.
