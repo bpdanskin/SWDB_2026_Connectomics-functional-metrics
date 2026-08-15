@@ -8,15 +8,63 @@ deliverable, not part of checking it.
 `jsonable` exists because `json.dump` fails on `np.float32` and, worse, will happily write
 a bare `NaN` literal that strict parsers reject. Casting up front means an artifact never
 fails to write *after* an expensive run.
+
+`run_stamp` and `latest_run` exist because a re-run that overwrites its predecessor
+destroys the only thing that can tell you whether a refactor changed the numbers. Writing
+each run to its own stamped directory makes "did this change anything?" answerable by
+comparing two directories, which is the gate every refactor step here depends on.
 """
 
 import os
+import re
 import subprocess
-from typing import Any, Optional
+import time
+from typing import Any, List, Optional
 
 import numpy as np
 
-__all__ = ["jsonable", "git_sha"]
+__all__ = ["jsonable", "git_sha", "run_stamp", "run_dir", "list_runs", "latest_run"]
+
+#: `<name>_YYYY-MM-DD_HH-MM-SS`. Sortable lexicographically, safe on every filesystem,
+#: and readable — the same shape the CCM asset already uses.
+_STAMP_RE = re.compile(r"^(?P<name>.+)_(?P<stamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})$")
+
+
+def run_stamp(when: Optional[float] = None) -> str:
+    """A sortable, filesystem-safe timestamp for one run. Local time, second resolution.
+
+    Call once per run and reuse it: deriving it twice can straddle a second boundary and
+    scatter one run's outputs across two directories.
+    """
+    return time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(when))
+
+
+def run_dir(root: str, name: str, stamp: Optional[str] = None) -> str:
+    """Path for this run's outputs, `<root>/<name>_<stamp>`. Does not create it."""
+    return os.path.join(root, f"{name}_{stamp or run_stamp()}")
+
+
+def list_runs(root: str, name: str) -> List[str]:
+    """Existing run directories for `name`, oldest first.
+
+    Sorted by the stamp in the directory name rather than by mtime, because copying a
+    directory between machines — which is exactly how these artifacts travel — rewrites
+    mtimes and would silently reorder them.
+    """
+    if not os.path.isdir(root):
+        return []
+    found = []
+    for entry in os.listdir(root):
+        match = _STAMP_RE.match(entry)
+        if match and match.group("name") == name and os.path.isdir(os.path.join(root, entry)):
+            found.append((match.group("stamp"), os.path.join(root, entry)))
+    return [path for _, path in sorted(found)]
+
+
+def latest_run(root: str, name: str) -> Optional[str]:
+    """The most recent existing run directory for `name`, or None."""
+    runs = list_runs(root, name)
+    return runs[-1] if runs else None
 
 
 def jsonable(obj: Any) -> Any:

@@ -48,6 +48,7 @@ __all__ = [
     "vonmises_pref_dir",
     "roi_frame",
     "to_output_schema",
+    "absent_frame",
 ]
 
 
@@ -135,20 +136,20 @@ DEFAULT_CONFIG = MetricConfig()
 #: the misspelling from the published filename.
 OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
     "drifting_gratings_full": [
-        "roi_unique_id", "mouse", "column", "volume", "plane", "roi",
+        "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "dsi", "frac_responsive_trials", "gosi", "is_responsive",
         "lifetime_sparseness", "osi", "preferred_dir", "preferred_sf", "pref_dir_mean"],
     "natural_images": [
-        "roi_unique_id", "mouse", "column", "volume", "plane", "roi",
+        "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "frac_responsive_trials", "lifetime_sparseness", "pref_img", "pref_response",
         "z_score"],
     "surround_supression_index": [
-        "roi_unique_id", "mouse", "column", "volume", "plane", "roi",
+        "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "ssi", "ssi_avg", "ssi_avg_at_pref_sf", "ssi_running",
         "ssi_running_avg_at_pref_sf", "ssi_stationary",
         "ssi_stationary_avg_at_pref_sf", "ssi_tuning_fit"],
     "rf_metrics": [
-        "roi_unique_id", "mouse", "column", "volume", "plane", "roi",
+        "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "has_rf_on", "has_rf_off", "has_rf_on_or_off",
         "azimuth_rf_on", "altitude_rf_on", "azimuth_rf_off", "altitude_rf_off"],
 }
@@ -160,7 +161,7 @@ OUTPUT_COLUMNS["natural_movie"] = OUTPUT_COLUMNS["natural_images"]
 # --------------------------------------------------------------------- identity
 
 
-def roi_frame(plane, mouse: str = "M409828") -> pd.DataFrame:
+def roi_frame(plane, mouse: Optional[str] = None) -> pd.DataFrame:
     """The six identity columns every published table starts with.
 
     `roi_unique_id` reproduces the published format `M{mouse}_{volume}_{plane}_{roi}`,
@@ -170,7 +171,15 @@ def roi_frame(plane, mouse: str = "M409828") -> pd.DataFrame:
     `(column, volume, plane, roi)`, never on either string.**
     """
     n = plane.n_rois
-    mouse_num = mouse.lstrip("M")
+    # The mouse comes from the file, not from a constant: this pipeline is expected to
+    # run on other animals. `mouse` overrides only when a caller genuinely knows better.
+    mouse_num = (mouse or "").lstrip("M") or getattr(plane, "mouse_id", "")
+    if not mouse_num:
+        raise ValueError(
+            "no mouse id: pass mouse=, or load the plane with load_plane(), which reads "
+            "it from nwb.subject via session_mouse()"
+        )
+    mouse = f"M{mouse_num}"
     return pd.DataFrame({
         "roi_unique_id": [f"M{mouse_num}_{plane.volume}_{plane.plane}_{r}" for r in plane.roi],
         "roi_key": [
@@ -181,6 +190,11 @@ def roi_frame(plane, mouse: str = "M409828") -> pd.DataFrame:
         "volume": [plane.volume] * n,
         "plane": np.full(n, plane.plane, dtype=int),
         "roi": plane.roi.astype(int),
+        # Physical depth, which (column, volume, plane) only encodes implicitly. NaN when
+        # the file does not carry it -- no metric depends on it.
+        "depth_um": np.full(n, getattr(plane, "depth_um", None)
+                            if getattr(plane, "depth_um", None) is not None else np.nan,
+                            dtype=float),
     })
 
 
@@ -207,6 +221,27 @@ def to_output_schema(df: pd.DataFrame, family: str) -> pd.DataFrame:
     for c in ("has_rf_on", "has_rf_off", "has_rf_on_or_off"):
         if c in out:                             # published writes True/False
             out[c] = out[c].astype(bool)
+    return out
+
+
+def absent_frame(plane, family: str, mouse: Optional[str] = None) -> pd.DataFrame:
+    """Identity rows with no metrics, for a session that did not run this stimulus.
+
+    The pre-flight found all six families present in all 25 sessions of this asset, so
+    this is insurance rather than a code path in daily use. It exists because
+    `stimulus_trials` returns an *empty frame* for a missing stimulus instead of raising:
+    without a guard, an absent stimulus would flow into the metric functions and come out
+    as confident nonsense rather than as an absence.
+
+    Booleans are set False rather than left NaN — `to_output_schema` casts them with
+    `astype(bool)`, and `bool(nan)` is **True**, which would report a receptive field for
+    every ROI in a session that never saw the stimulus.
+    """
+    out = roi_frame(plane, mouse=mouse)
+    for column in OUTPUT_COLUMNS[family]:
+        if column in out:
+            continue
+        out[column] = False if column.startswith("has_rf_") else np.nan
     return out
 
 
@@ -256,7 +291,7 @@ def natural_movie_metrics(
     *,
     config: MetricConfig = DEFAULT_CONFIG,
     rng: Optional[np.random.Generator] = None,
-    mouse: str = "M409828",
+    mouse: Optional[str] = None,
 ) -> pd.DataFrame:
     """Natural-movie metrics: one row per ROI.
 
@@ -279,6 +314,8 @@ def natural_movie_metrics(
     bootstrap is involved, which makes this the one fully deterministic end-to-end check
     against the published table.
     """
+    if not len(trials):
+        return absent_frame(plane, "natural_movie", mouse)
     rng = np.random.default_rng() if rng is None else rng
     traces = plane.traces[config.trace_type["natural_movie"]]
     window = (0.0, config.nm_response_frames * plane.dt)
@@ -434,7 +471,7 @@ def drifting_gratings_metrics(
     dg_type: str = "full",
     config: MetricConfig = DEFAULT_CONFIG,
     rng: Optional[np.random.Generator] = None,
-    mouse: str = "M409828",
+    mouse: Optional[str] = None,
 ) -> "DGResult":
     """Drifting-gratings metrics for one plane.
 
@@ -448,6 +485,13 @@ def drifting_gratings_metrics(
     surround suppression keys off the first and `osi`/`dsi` off the second -- a silent
     divergence would corrupt SSI without touching any drifting-gratings column.
     """
+    if not len(trials):
+        raise ValueError(
+            f"no drifting_gratings_{dg_type} sweeps for column {plane.column} "
+            f"volume {plane.volume} plane {plane.plane}. Surround suppression consumes "
+            "this result, so there is no empty value that stays honest downstream -- "
+            "skip the session instead."
+        )
     import warnings
 
     rng = np.random.default_rng() if rng is None else rng
@@ -593,7 +637,7 @@ def surround_suppression_metrics(
     plane,
     *,
     config: MetricConfig = DEFAULT_CONFIG,
-    mouse: str = "M409828",
+    mouse: Optional[str] = None,
 ) -> pd.DataFrame:
     """Eight surround-suppression indices, all of the form (W - F) / (W + F).
 
@@ -667,7 +711,7 @@ def natural_images_metrics(
     ns_type: str = "natural_images",
     config: MetricConfig = DEFAULT_CONFIG,
     rng: Optional[np.random.Generator] = None,
-    mouse: str = "M409828",
+    mouse: Optional[str] = None,
 ) -> pd.DataFrame:
     """Natural-image metrics: one row per ROI.
 
@@ -689,6 +733,8 @@ def natural_images_metrics(
     `duration_sec` attribute that the current files no longer carry, so it is a recovered
     parameter rather than a known one — see the window probe in the notebook.
     """
+    if not len(trials):
+        return absent_frame(plane, ns_type, mouse)
     rng = np.random.default_rng() if rng is None else rng
     traces = plane.traces[config.trace_type[ns_type]]
     window = (0.0, float(config.ni_response_seconds))
@@ -780,7 +826,7 @@ def receptive_field_metrics(
     *,
     config: MetricConfig = DEFAULT_CONFIG,
     rng: Optional[np.random.Generator] = None,
-    mouse: str = "M409828",
+    mouse: Optional[str] = None,
 ) -> pd.DataFrame:
     """Receptive fields from the locally-sparse-noise stimulus.
 
@@ -806,6 +852,8 @@ def receptive_field_metrics(
     -1 / 0 / 1 where the original assumed 0 / 127 / 255, and hard-coding those would make
     both design matrices all-False and report zero receptive fields for every ROI.
     """
+    if not len(trials):
+        return absent_frame(plane, "rf_metrics", mouse)
     rng = np.random.default_rng() if rng is None else rng
     traces = plane.traces[config.trace_type["locally_sparse_noise"]]
     window = (0.0, config.lsn_response_frames * plane.dt)

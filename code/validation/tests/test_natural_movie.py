@@ -45,7 +45,7 @@ trials = pd.DataFrame({"start_time": starts, "stop_time": starts+sweep_dt,
                        "frame": frames.astype(float), "stim_name": "natural_movie"})
 roi_table = pd.DataFrame({"column":1,"volume":3,"plane":0,"roi":np.arange(N_ROIS)*3,
                           "pika_roi_confidence":np.full(N_ROIS,0.9)})
-plane = vn.PlaneData(column=1, volume="3", plane=0, roi=np.arange(N_ROIS)*3,
+plane = vn.PlaneData(mouse_id="409828", depth_um=150.0, column=1, volume="3", plane=0, roi=np.arange(N_ROIS)*3,
                      is_valid=np.ones(N_ROIS,bool), timestamps=ts,
                      traces={"events": traces}, roi_table=roi_table, dt=DT)
 

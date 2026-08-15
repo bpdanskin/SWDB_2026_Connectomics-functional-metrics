@@ -11,6 +11,8 @@ import json
 import shutil
 import tempfile
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 
@@ -40,9 +42,20 @@ class Table:
     def to_dataframe(self): return self._df.copy()
 
 
+class ImagingPlane:
+    """Depth lives in `location` as free text ("50 um"), not in origin_coords."""
+    def __init__(self, depth_um): self.location = f"{depth_um} um"
+
+
 class Series:
-    def __init__(self, data, ts, rois):
+    def __init__(self, data, ts, rois, depth_um=50):
         self.data, self.timestamps, self.rois = data, ts, Table(rois)
+        self.rois.table = SimpleNamespace(imaging_plane=ImagingPlane(depth_um))
+
+
+class Subject:
+    def __init__(self, subject_id="409828"):
+        self.subject_id, self.species, self.sex = subject_id, "Mus musculus", "male"
 
 
 class Module:
@@ -138,8 +151,9 @@ def make_nwb(stim=STIM, lsn_uniform=True, n_planes=2, with_stim_table=True):
         })
         rois.index.name = "id"
         d = RNG.gamma(2.0, 0.3, size=(N_FRAMES, n_rois))
-        proc[f"plane-{p}"] = Module({"dff": Series(d, TS, rois),
-                                     "events": Series(d * 0.5, TS, rois)})
+        depth = 50 + 16 * p          # the asset's lattice: 6 planes, 16 um apart
+        proc[f"plane-{p}"] = Module({"dff": Series(d, TS, rois, depth),
+                                     "events": Series(d * 0.5, TS, rois, depth)})
     rs = RNG.gamma(1.0, 1.0, size=40000)
     proc["behavior"] = Module({"running_speed": Series(rs, np.linspace(0, 3600, 40000), None)})
 
@@ -149,6 +163,7 @@ def make_nwb(stim=STIM, lsn_uniform=True, n_planes=2, with_stim_table=True):
 
     class NWB:
         processing = proc
+        subject = Subject()
         stimulus = {"locally_sparse_noise": Images(make_lsn(uniform=lsn_uniform)),
                     "natural_images": Images(RNG.integers(0, 255, (118, 4, 4))),
                     "natural_movie": Images(RNG.integers(0, 255, (100, 4, 4)))}

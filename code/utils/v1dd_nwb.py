@@ -33,6 +33,7 @@ which tables exist, which columns, what is in them — is `validation/schema_rep
 because that is a question you ask about the data rather than of it.
 """
 
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,8 @@ __all__ = [
     "peek_session",
     "list_planes",
     "load_plane",
+    "session_mouse",
+    "plane_depth_um",
     "load_stimulus_table",
     "stimulus_trials",
     "epoch_table",
@@ -73,6 +76,11 @@ STIMULUS_TABLE_COLUMNS = [
 #: table is every drifting-gratings row.
 DG_PARAM_COLUMNS = ["temporal_frequency", "spatial_frequency", "direction"]
 
+#: `ImagingPlane.location` when it carries a depth: a number and an optional unit, and
+#: nothing else. Anchored on purpose -- see `plane_depth_um`.
+_DEPTH_RE = re.compile(r"^(-?\d+(?:\.\d+)?)\s*(?:um|µm|μm|micron|micrometers?)?$",
+                       re.IGNORECASE)
+
 
 @dataclass
 class PlaneData:
@@ -87,6 +95,8 @@ class PlaneData:
     traces: Dict[str, np.ndarray]     # trace_type -> (n_frames, n_rois)
     roi_table: pd.DataFrame
     dt: float                         # median inter-frame interval, seconds
+    mouse_id: str = ""                # bare number, e.g. "409828"; see session_mouse
+    depth_um: Optional[float] = None  # imaging depth, None if the file does not say
 
     @property
     def n_rois(self) -> int:
@@ -233,6 +243,66 @@ def _as_volume_str(value) -> str:
         return str(value)
 
 
+def session_mouse(nwb, path=None) -> Tuple[str, str]:
+    """`(mouse_id, mouse_label)` for a session, e.g. `("409828", "M409828")`.
+
+    Two forms, kept apart deliberately: `mouse_id` is the bare number that goes inside
+    `roi_unique_id`, `mouse_label` is the M-prefixed form the tables carry in their
+    `mouse` column and the filenames use. Carrying one string and prefixing on demand is
+    how you end up with `MM409828`.
+
+    Resolution never silently defaults:
+
+    1. `nwb.subject.subject_id` — present and agreeing with the directory name in all 25
+       sessions of this asset, so this is the rung that normally answers.
+    2. the leading token of the session directory name (`409828_2018-12-13_...`), if a
+       `path` is supplied. Insurance for a file written without subject metadata.
+    3. raise. A wrong mouse id silently corrupts every ROI identifier in the output.
+    """
+    subject = getattr(nwb, "subject", None)
+    raw = getattr(subject, "subject_id", None) if subject is not None else None
+    if raw is None or not str(raw).strip():
+        token = Path(path).parent.name.split("_", 1)[0] if path else ""
+        if not token.isdigit():
+            raise ValueError(
+                "cannot determine the mouse: nwb.subject.subject_id is empty and the "
+                f"session name {token!r} does not start with a numeric id"
+            )
+        raw = token
+    mouse_id = str(raw).strip().lstrip("Mm")
+    return mouse_id, f"M{mouse_id}"
+
+
+def plane_depth_um(nwb, plane) -> Optional[float]:
+    """Imaging depth of one plane in micrometres, or None if the file does not say.
+
+    This asset puts it in `ImagingPlane.location` as free text — `"50 um"` — rather than
+    in the structured `origin_coords`. Across the 5x5 grid the values form a lattice: six
+    planes 16 um apart within a volume, volumes 96 um apart, spanning 50-514 um, which is
+    the full cortical depth.
+
+    Returns None rather than raising. Depth is additional information — no metric depends
+    on it — so one session with an unexpected string should not stop a run.
+
+    The match is **anchored**: the field must be a number and an optional unit and nothing
+    else. An unanchored search looks equivalent and is not — `location` is free text, and
+    on a file that wrote something like `"VISp layer 2/3"` a loose pattern happily returns
+    a depth of 2 μm. A wrong depth is worse than no depth, because nothing downstream can
+    tell it was a parse of the wrong number.
+    """
+    key = f"plane-{int(plane)}" if not isinstance(plane, str) else plane
+    try:
+        series = nwb.processing[key][
+            "dff" if "dff" in nwb.processing[key].data_interfaces else "events"]
+        location = getattr(series.rois.table.imaging_plane, "location", None)
+    except Exception:                                        # noqa: BLE001
+        return None
+    if location is None:
+        return None
+    match = _DEPTH_RE.match(str(location).strip())
+    return float(match.group(1)) if match else None
+
+
 def load_plane(
     nwb,
     plane,
@@ -301,6 +371,8 @@ def load_plane(
         traces=traces,
         roi_table=roi_table,
         dt=float(np.median(np.diff(timestamps))),
+        mouse_id=session_mouse(nwb)[0],
+        depth_um=plane_depth_um(nwb, key),
     )
 
 

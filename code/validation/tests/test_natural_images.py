@@ -54,7 +54,7 @@ traces[ts >= spont_start] = RNG.gamma(1.0, 0.1, size=(int((ts >= spont_start).su
 
 roi_table = pd.DataFrame({"column": 1, "volume": 3, "plane": 0,
                           "roi": np.arange(N_ROIS), "pika_roi_confidence": 0.9})
-plane = vn.PlaneData(column=1, volume="3", plane=0, roi=np.arange(N_ROIS),
+plane = vn.PlaneData(mouse_id="409828", depth_um=150.0, column=1, volume="3", plane=0, roi=np.arange(N_ROIS),
                      is_valid=np.ones(N_ROIS, bool), timestamps=ts,
                      traces={"events": traces}, roi_table=roi_table, dt=DT)
 

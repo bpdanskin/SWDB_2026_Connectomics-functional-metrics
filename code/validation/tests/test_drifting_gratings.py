@@ -69,7 +69,7 @@ def build_session(scale=1.0, seed=0):
 
     roi_table = pd.DataFrame({"column": 1, "volume": 3, "plane": 0,
                               "roi": np.arange(N_ROIS), "pika_roi_confidence": 0.9})
-    plane = vn.PlaneData(column=1, volume="3", plane=0, roi=np.arange(N_ROIS),
+    plane = vn.PlaneData(mouse_id="409828", depth_um=150.0, column=1, volume="3", plane=0, roi=np.arange(N_ROIS),
                          is_valid=np.ones(N_ROIS, bool), timestamps=ts,
                          traces={"events": traces}, roi_table=roi_table, dt=DT)
     # running speed: first half of every condition's trials fast, rest slow
@@ -188,7 +188,7 @@ def fake(resp, speeds, pref=(0, 0)):
         dir_list=DIRS, sf_list=SFS, blank_responses=np.empty((n, 0)))
 
 
-rp = vn.PlaneData(column=1, volume="3", plane=0, roi=np.array([0]),
+rp = vn.PlaneData(mouse_id="409828", depth_um=150.0, column=1, volume="3", plane=0, roi=np.array([0]),
                   is_valid=np.ones(1, bool), timestamps=np.arange(10) * DT,
                   traces={}, roi_table=pd.DataFrame({"column": [1], "volume": [3],
                                                      "plane": [0], "roi": [0]}), dt=DT)
