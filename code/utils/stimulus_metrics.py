@@ -1,8 +1,9 @@
 """Stimulus-response metrics, ported from `allen_v1dd` onto NWB-Zarr.
 
 One family per function, each returning a tidy per-ROI DataFrame with the same column
-names the published `data_frames/*_M409828.csv` tables use, so a regenerated table drops
-in where the old one was.
+names the historical `data_frames/*_M409828.csv` tables use, so a regenerated table
+drops in where the old one was. Comparing against those tables is
+`validation/compare.py`'s job, not this module's.
 
 **These reproduce the original, bugs included.** Where the original does something
 defensible-but-wrong, the behaviour is kept and named in a `MetricConfig` flag, so the
@@ -34,7 +35,7 @@ import trial_responses as tr
 __all__ = [
     "MetricConfig",
     "DEFAULT_CONFIG",
-    "COLUMN_ORDER",
+    "OUTPUT_COLUMNS",
     "natural_movie_metrics",
     "natural_images_metrics",
     "receptive_field_metrics",
@@ -46,9 +47,7 @@ __all__ = [
     "vonmises_two_peak_fit",
     "vonmises_pref_dir",
     "roi_frame",
-    "to_published_schema",
-    "compare_to_published",
-    "load_published",
+    "to_output_schema",
 ]
 
 
@@ -134,7 +133,7 @@ DEFAULT_CONFIG = MetricConfig()
 
 #: Published column names and order, per output file. `surround_supression_index` keeps
 #: the misspelling from the published filename.
-COLUMN_ORDER: Dict[str, Sequence[str]] = {
+OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
     "drifting_gratings_full": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi",
         "dsi", "frac_responsive_trials", "gosi", "is_responsive",
@@ -153,9 +152,9 @@ COLUMN_ORDER: Dict[str, Sequence[str]] = {
         "has_rf_on", "has_rf_off", "has_rf_on_or_off",
         "azimuth_rf_on", "altitude_rf_on", "azimuth_rf_off", "altitude_rf_off"],
 }
-COLUMN_ORDER["drifting_gratings_windowed"] = COLUMN_ORDER["drifting_gratings_full"]
-COLUMN_ORDER["natural_images_12"] = COLUMN_ORDER["natural_images"]
-COLUMN_ORDER["natural_movie"] = COLUMN_ORDER["natural_images"]
+OUTPUT_COLUMNS["drifting_gratings_windowed"] = OUTPUT_COLUMNS["drifting_gratings_full"]
+OUTPUT_COLUMNS["natural_images_12"] = OUTPUT_COLUMNS["natural_images"]
+OUTPUT_COLUMNS["natural_movie"] = OUTPUT_COLUMNS["natural_images"]
 
 
 # --------------------------------------------------------------------- identity
@@ -185,9 +184,14 @@ def roi_frame(plane, mouse: str = "M409828") -> pd.DataFrame:
     })
 
 
-def to_published_schema(df: pd.DataFrame, family: str) -> pd.DataFrame:
-    """Reorder and dtype a metrics frame to match the published CSV exactly."""
-    cols = list(COLUMN_ORDER[family])
+def to_output_schema(df: pd.DataFrame, family: str) -> pd.DataFrame:
+    """Reorder and dtype a metrics frame to the asset's output schema.
+
+    The column order matches the historical `data_frames` tables, including the
+    `surround_supression_index` misspelling, so a regenerated table drops in where the old
+    one was.
+    """
+    cols = list(OUTPUT_COLUMNS[family])
     missing = [c for c in cols if c not in df.columns]
     if missing:
         raise KeyError(f"{family}: missing published columns {missing}")
@@ -326,99 +330,6 @@ def natural_movie_metrics(
     out["pref_response"] = pref_response
     out["z_score"] = z_score
     return out
-
-
-# --------------------------------------------------------------------- validation
-
-
-def load_published(published_dir: str, family: str, mouse: str = "M409828") -> pd.DataFrame:
-    """Read a published metrics CSV with the dtypes it actually needs.
-
-    `volume` must be read as a string: volumes run 1..9 and a..f, so `int` crashes on the
-    3p sessions. Pandas also warns about mixed types in that column without an explicit
-    dtype.
-    """
-    import os
-
-    path = os.path.join(published_dir, f"{family}_{mouse}.csv")
-    df = pd.read_csv(path, dtype={"volume": str})
-    return df.astype({"column": int, "plane": int, "roi": int})
-
-
-def compare_to_published(
-    new: pd.DataFrame,
-    published: pd.DataFrame,
-    metrics: Sequence[str],
-    keys: Sequence[str] = ("column", "volume", "plane", "roi"),
-    exact: Sequence[str] = (),
-    tol: float = 1e-9,
-) -> Dict[str, Any]:
-    """Per-metric agreement between a regenerated table and the published one.
-
-    Joins on `(column, volume, plane, roi)`, never on `roi_unique_id`, which omits the
-    column and collides. Reports set differences explicitly, because the NWB asset is
-    ROI-filtered while the published tables carry every segmented ROI, so an inner join
-    is expected to drop rows on the published side.
-
-    `exact` names categorical columns (preferred direction, preferred image) compared by
-    equality rather than correlation.
-    """
-    keys = list(keys)
-    left = new.copy()
-    right = published.copy()
-    for frame in (left, right):
-        frame["volume"] = frame["volume"].astype(str)
-        for k in ("column", "plane", "roi"):
-            frame[k] = frame[k].astype(int)
-
-    merged = left.merge(right, on=keys, how="inner", suffixes=("_new", "_pub"))
-    only_new = len(left) - len(merged)
-    only_pub = len(right) - len(merged)
-
-    report: Dict[str, Any] = {
-        "n_new": int(len(left)),
-        "n_published": int(len(right)),
-        "n_joined": int(len(merged)),
-        "n_only_new": int(only_new),
-        "n_only_published": int(only_pub),
-        "metrics": {},
-    }
-
-    for m in metrics:
-        a = pd.to_numeric(merged.get(f"{m}_new"), errors="coerce")
-        b = pd.to_numeric(merged.get(f"{m}_pub"), errors="coerce")
-        if a is None or b is None:
-            report["metrics"][m] = {"error": "column missing on one side"}
-            continue
-        both = a.notna() & b.notna()
-        entry: Dict[str, Any] = {
-            "n_both_finite": int(both.sum()),
-            "n_new_only_finite": int((a.notna() & ~b.notna()).sum()),
-            "n_pub_only_finite": int((~a.notna() & b.notna()).sum()),
-        }
-        if both.sum():
-            av, bv = a[both].to_numpy(), b[both].to_numpy()
-            diff = np.abs(av - bv)
-            entry.update({
-                "max_abs_diff": float(diff.max()),
-                "median_abs_diff": float(np.median(diff)),
-                "p95_abs_diff": float(np.percentile(diff, 95)),
-                "frac_within_tol": float(np.mean(diff <= tol)),
-                "tol": tol,
-            })
-            if m in exact:
-                # Relative, not bitwise. `preferred_sf` carries a float32 round-trip
-                # (0.04 arrives as 0.039999999...), so two values agreeing to 16 digits
-                # can still fail `==` and report 0% agreement on a column that is in
-                # fact identical. A genuine category change is a 100% difference, so
-                # nothing real hides under this tolerance.
-                entry["frac_exact"] = float(np.mean(np.isclose(av, bv, rtol=1e-9, atol=0)))
-                entry["frac_exact_bitwise"] = float(np.mean(av == bv))
-            if both.sum() > 2 and np.std(av) > 0 and np.std(bv) > 0:
-                entry["pearson_r"] = float(np.corrcoef(av, bv)[0, 1])
-        report["metrics"][m] = entry
-
-    return report
 
 
 # --------------------------------------------------------------- drifting gratings
