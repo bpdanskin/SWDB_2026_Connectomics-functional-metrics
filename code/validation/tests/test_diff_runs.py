@@ -81,6 +81,27 @@ g = a.copy(); g.loc[0, "roi_unique_id"] = "M999999_3_0_0"
 r = cmp_.diff_tables(a, g)
 check("string change flagged", r["changed"]["roi_unique_id"]["n_differing"] == 1)
 
+print("\n[6b] boolean columns compare without a hand cast")
+# Regression: pd.to_numeric leaves a boolean column boolean, and numpy raises outright on
+# `True - False`. has_rf_on/off/on_or_off are boolean, so compare_tables coerces
+# internally rather than making every caller remember.
+bools = a.copy()
+bools["has_rf_on"] = np.arange(N) % 3 == 0
+bools["has_rf_off"] = np.arange(N) % 2 == 0
+other = bools.copy()
+other.loc[:4, "has_rf_on"] = ~other.loc[:4, "has_rf_on"]
+rep = cmp_.compare_tables(bools, other, ["has_rf_on", "has_rf_off"],
+                          exact=["has_rf_on", "has_rf_off"])
+check("boolean column compares without raising",
+      rep["metrics"]["has_rf_on"]["n_both_finite"] == N)
+check("the flipped rows are counted",
+      abs(rep["metrics"]["has_rf_on"]["frac_exact"] - (N - 5) / N) < 1e-12,
+      str(rep["metrics"]["has_rf_on"]["frac_exact"]))
+check("an unchanged boolean column reports perfect agreement",
+      rep["metrics"]["has_rf_off"]["frac_exact"] == 1.0)
+check("max_abs_diff is 1.0 for a flipped bool",
+      rep["metrics"]["has_rf_on"]["max_abs_diff"] == 1.0)
+
 print("\n[7] diff_run_dirs over a directory pair")
 root = tempfile.mkdtemp(prefix="diffruns_")
 old, new = os.path.join(root, "old"), os.path.join(root, "new")
