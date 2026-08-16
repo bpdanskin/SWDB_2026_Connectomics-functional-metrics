@@ -20,11 +20,13 @@ vn = load("v1dd_nwb")
 sm = load("stimulus_metrics")
 
 
-def fake_plane(mouse_id="409828", depth_um=150.0, n=5):
+def fake_plane(mouse_id="409828", depth_um=150.0, n=5, confidence=None):
     roi = np.arange(n)
+    table = pd.DataFrame() if confidence is None else pd.DataFrame(
+        {"pika_roi_confidence": confidence})
     return vn.PlaneData(
         column=1, volume="3", plane=2, roi=roi, is_valid=np.ones(n, bool),
-        timestamps=np.arange(n, dtype=float), traces={}, roi_table=pd.DataFrame(),
+        timestamps=np.arange(n, dtype=float), traces={}, roi_table=table,
         dt=0.165, mouse_id=mouse_id, depth_um=depth_um)
 
 
@@ -100,11 +102,29 @@ try:
 except ValueError as exc:
     check("raises rather than emitting M_3_2_0", "no mouse id" in str(exc))
 
+print("\n[3b] pika_roi_confidence: the label that says which ROIs are unreliable")
+conf = [0.9, 0.2, 0.51, 0.5, 0.99]
+f = sm.roi_frame(fake_plane(confidence=conf))
+check("carried through from the ROI table", f["pika_roi_confidence"].tolist() == conf)
+check("float dtype", f["pika_roi_confidence"].dtype == float)
+# is_valid is confidence > 0.5, strictly -- exactly 0.5 is not valid.
+check("the >0.5 threshold that defines is_valid",
+      (f["pika_roi_confidence"] > 0.5).tolist() == [True, False, True, False, True])
+check("NaN, not 0, when the ROI table does not carry it",
+      bool(np.isnan(sm.roi_frame(fake_plane())["pika_roi_confidence"]).all()),
+      "a missing confidence must not read as zero confidence")
+check("it is identity, not a metric -- absent_frame keeps it",
+      "pika_roi_confidence" in sm.absent_frame(fake_plane(confidence=conf), "rf_metrics")
+      and sm.absent_frame(fake_plane(confidence=conf),
+                          "rf_metrics")["pika_roi_confidence"].tolist() == conf)
+
 print("\n[4] depth_um reaches every output table")
 for fam in ("drifting_gratings_full", "drifting_gratings_windowed", "natural_images",
             "natural_images_12", "natural_movie", "surround_supression_index",
             "rf_metrics"):
     check(f"{fam} schema has depth_um", "depth_um" in sm.OUTPUT_COLUMNS[fam])
+    check(f"{fam} schema has pika_roi_confidence",
+          "pika_roi_confidence" in sm.OUTPUT_COLUMNS[fam])
 check("depth_um sits after the four join keys",
       sm.OUTPUT_COLUMNS["natural_images"].index("depth_um")
       == sm.OUTPUT_COLUMNS["natural_images"].index("roi") + 1)
@@ -116,7 +136,8 @@ for fam in ("natural_movie", "natural_images_12", "rf_metrics",
     out = sm.to_output_schema(a, fam)
     check(f"{fam}: schema and row count intact",
           list(out.columns) == list(sm.OUTPUT_COLUMNS[fam]) and len(out) == 5)
-    ident = {"roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um"}
+    ident = {"roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
+             "pika_roi_confidence"}
     metrics = [c for c in out.columns if c not in ident]
     if fam == "rf_metrics":
         # The trap: to_output_schema casts these with astype(bool), and bool(nan) is True,

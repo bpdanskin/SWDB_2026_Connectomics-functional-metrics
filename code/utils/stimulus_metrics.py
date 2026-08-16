@@ -188,19 +188,23 @@ REFERENCE_CONFIG = MetricConfig(
 OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
     "drifting_gratings_full": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
+        "pika_roi_confidence",
         "dsi", "frac_responsive_trials", "gosi", "is_responsive",
         "lifetime_sparseness", "osi", "preferred_dir", "preferred_sf", "pref_dir_mean"],
     "natural_images": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
+        "pika_roi_confidence",
         "frac_responsive_trials", "lifetime_sparseness", "pref_img", "pref_response",
         "z_score"],
     "surround_supression_index": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
+        "pika_roi_confidence",
         "ssi", "ssi_avg", "ssi_avg_at_pref_sf", "ssi_running",
         "ssi_running_avg_at_pref_sf", "ssi_stationary",
         "ssi_stationary_avg_at_pref_sf", "ssi_tuning_fit"],
     "rf_metrics": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
+        "pika_roi_confidence",
         "has_rf_on", "has_rf_off", "has_rf_on_or_off",
         "azimuth_rf_on", "altitude_rf_on", "azimuth_rf_off", "altitude_rf_off"],
 }
@@ -213,7 +217,7 @@ OUTPUT_COLUMNS["natural_movie"] = OUTPUT_COLUMNS["natural_images"]
 
 
 def roi_frame(plane, mouse: Optional[str] = None) -> pd.DataFrame:
-    """The six identity columns every published table starts with.
+    """The identity columns every output table starts with.
 
     `roi_unique_id` reproduces the published format `M{mouse}_{volume}_{plane}_{roi}`,
     which **omits the column** and therefore collides across the five columns — 164,345
@@ -246,7 +250,22 @@ def roi_frame(plane, mouse: Optional[str] = None) -> pd.DataFrame:
         "depth_um": np.full(n, getattr(plane, "depth_um", None)
                             if getattr(plane, "depth_um", None) is not None else np.nan,
                             dtype=float),
+        # Segmentation confidence, emitted so consumers can see which ROIs the pipeline
+        # treated as unreliable. Without it, low-confidence ROIs are neither dropped nor
+        # labelled: `preferred_dir`, the `ssi*` columns and every receptive-field column
+        # are suppressed for them, but `osi`, `dsi`, `lifetime_sparseness` and the natural
+        # scene metrics are populated as usual, so they enter any population average
+        # unnoticed. `is_valid` is this column > 0.5.
+        "pika_roi_confidence": _roi_confidence(plane),
     })
+
+
+def _roi_confidence(plane) -> np.ndarray:
+    """Per-ROI segmentation confidence, or NaN where the ROI table does not carry it."""
+    table = getattr(plane, "roi_table", None)
+    if table is None or "pika_roi_confidence" not in getattr(table, "columns", []):
+        return np.full(plane.n_rois, np.nan, dtype=float)
+    return pd.to_numeric(table["pika_roi_confidence"], errors="coerce").to_numpy(float)
 
 
 def to_output_schema(df: pd.DataFrame, family: str) -> pd.DataFrame:
