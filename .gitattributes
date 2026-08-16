@@ -1,0 +1,12 @@
+# Notebooks are JSON with embedded outputs and execution counts. A three-way text merge
+# produces syntactically broken JSON far more often than it produces a useful result, so
+# treat them as unmergeable: a conflict then means "choose a side" rather than "hand-repair
+# a mangled file". Resolve with `git checkout --ours <nb>` or `--theirs <nb>`.
+#
+# This matters because this fork tracks an upstream that edits the same workshop notebooks.
+*.ipynb -merge
+
+# Keep line endings stable across the Windows checkouts and the Linux capsule.
+*.py text eol=lf
+*.json text eol=lf
+code/run text eol=lf

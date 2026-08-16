@@ -2,4 +2,7 @@
 set -ex
 
 # This is the master script for the capsule. When you click "Reproducible Run", the code in this file will execute.
-python -u run_capsule.py "$@"
+# The stimulus-metrics pipeline lives in its own entry point rather than in
+# run_capsule.py, so that upstream can develop the shared stub without every
+# merge landing on top of ours. This line is the whole overlap.
+python -u run_stimulus_metrics.py "$@"
