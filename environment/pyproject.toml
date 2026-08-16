@@ -18,6 +18,7 @@ dependencies = [
     "connects-common-connectivity",
     "numpy==2.5.1",
     "statsmodels==0.14.6",
+    "nglui==4.7.4",
 ]
 description = "SWDB 2026 Connectomics"
 name = "swdb-2026-connectomics"
