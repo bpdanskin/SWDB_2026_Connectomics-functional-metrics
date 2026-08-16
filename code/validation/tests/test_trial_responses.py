@@ -1,15 +1,25 @@
 """Verify code/utils/trial_responses.py against a synthetic trace. No data needed.
 
-The point of the xarray dependency here is to *prove* that searchsorted reproduces
-`DataArray.sel(time=slice(...))` label semantics, which is the assumption the whole
-port rests on.
+Section [1] uses xarray as an oracle, to *prove* that searchsorted reproduces
+`DataArray.sel(time=slice(...))` label semantics — the assumption the whole port rests on.
+
+**xarray is optional here and imported defensively.** It is a test-only dependency and is
+not installed on the capsule; importing it at module scope meant one missing package took
+out all 36 checks in this file, so the environment that actually built the asset got no
+coverage of the response engine at all. Only section [1] needs it.
 """
 
 from harness import check, fails, load, require_dataset, summary
 import sys
 
 import numpy as np
-import xarray as xr
+
+try:
+    import xarray as xr
+    HAVE_XARRAY = True
+except ImportError:
+    HAVE_XARRAY = False
+
 tr = load("trial_responses")
 
 
@@ -21,17 +31,39 @@ TS = np.cumsum(RNG.normal(DT, DT * 0.002, N_FRAMES)) + 12.3
 TRACES = RNG.gamma(2.0, 0.5, size=(N_FRAMES, N_ROIS))   # events-like, non-negative
 
 print("[1] window_bounds reproduces xarray label slicing")
-da = xr.DataArray(TRACES, dims=("time", "roi"), coords={"time": TS})
 starts = RNG.uniform(TS[5], TS[-30], size=200)
-for w0, w1 in [(0.0, 2.0), (-1.0, 0.0), (0.0, 0.5), (0.0, 3 * DT)]:
+WINDOWS = [(0.0, 2.0), (-1.0, 0.0), (0.0, 0.5), (0.0, 3 * DT)]
+if not HAVE_XARRAY:
+    print("  SKIP  xarray not installed -- the oracle comparison cannot run here.")
+    print("        The remaining sections do not need it. Equivalent semantics are")
+    print("        re-checked against an explicit boolean mask below.")
+else:
+    da = xr.DataArray(TRACES, dims=("time", "roi"), coords={"time": TS})
+    for w0, w1 in WINDOWS:
+        a, b = tr.window_bounds(TS, starts, w0, w1)
+        bad = 0
+        for i, s in enumerate(starts):
+            want = da.sel(time=slice(s + w0, s + w1)).time.values
+            got = TS[a[i]:b[i]]
+            if not (len(want) == len(got) and np.array_equal(want, got)):
+                bad += 1
+        check(f"window ({w0}, {w1}) matches xarray on 200 starts", bad == 0,
+              f"{bad} mismatches")
+
+# Independent of xarray: label-closed slicing is `t0 <= t <= t1` on both ends, which a
+# boolean mask states directly. This is a weaker oracle than xarray -- it encodes my
+# reading of the semantics rather than an implementation of them -- but it means the
+# property is still checked in an environment without xarray, which is where the asset
+# is actually built.
+for w0, w1 in WINDOWS:
     a, b = tr.window_bounds(TS, starts, w0, w1)
     bad = 0
     for i, s in enumerate(starts):
-        want = da.sel(time=slice(s + w0, s + w1)).time.values
-        got = TS[a[i]:b[i]]
-        if not (len(want) == len(got) and np.array_equal(want, got)):
+        mask = (TS >= s + w0) & (TS <= s + w1)
+        if not np.array_equal(TS[mask], TS[a[i]:b[i]]):
             bad += 1
-    check(f"window ({w0}, {w1}) matches xarray on 200 starts", bad == 0, f"{bad} mismatches")
+    check(f"window ({w0}, {w1}) is closed on both ends, 200 starts", bad == 0,
+          f"{bad} mismatches")
 
 check("windows have variable width (the thing that looks like it needs a loop)",
       len(np.unique(tr.window_bounds(TS, starts, 0.0, 2.0)[1]
