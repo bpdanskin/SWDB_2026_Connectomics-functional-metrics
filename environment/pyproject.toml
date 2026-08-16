@@ -10,7 +10,7 @@ dependencies = [
     "matplotlib==3.11.1",
     "nwbwidgets==0.11.3",
     "ossify==0.2.5",
-    "pyarrow==21.0.0",
+    "pyarrow==25.0.0",
     "pynwb==4.1.0",
     "scipy==1.18.0",
     "seaborn==0.13.2",
