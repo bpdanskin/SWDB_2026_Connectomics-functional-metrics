@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -52,7 +53,12 @@ log = logging.getLogger("metadata")
 #: BEHAVIOR_VIDEOS, which the input asset also declares: nothing here reads video.
 MODALITIES = [Modality.POPHYS, Modality.BEHAVIOR]
 
-REPO_URL = "https://github.com/AllenSWDB/SWDB_2026_Connectomics"
+#: The repository this pipeline actually lives in. It is the fork, not upstream: upstream
+#: has none of `code/validation`, `code/metadata.py` or the metrics modules, so pointing a
+#: published asset at it would send a reader looking for code that is not there.
+REPO_URL = os.environ.get(
+    "SWDB_CODE_URL",
+    "https://github.com/bpdanskin/SWDB_2026_Connectomics-functional-metrics")
 
 DATA_SUMMARY = (
     "Per-ROI stimulus-response metrics for the V1DD two-photon sessions: orientation and "
@@ -74,6 +80,17 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 
 def _git_commit(repo: Path) -> Optional[str]:
+    """The commit this code was built from, or None.
+
+    `SWDB_CODE_VERSION` comes first because the case that matters most has no answer
+    otherwise: a CodeOcean reproducible run copies `code/` without `.git`, so `git
+    rev-parse` fails and the published asset ships with `commit_hash: null` — exactly what
+    happened on the first full run. Setting the variable before launching is the only way
+    to stamp a version there.
+    """
+    env = os.environ.get("SWDB_CODE_VERSION", "").strip()
+    if env:
+        return env
     try:
         out = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                              capture_output=True, text=True, timeout=10, check=True)
@@ -199,7 +216,7 @@ def build_data_description(sessions: List[Path], creation_time: datetime,
 
 def build_processing(asset_dir: Path, sessions: List[Path], input_asset: Path,
                      experimenters: List[str], start_time: Optional[datetime],
-                     results_dir: Optional[Path], repo: Path) -> Processing:
+                     validation_dir: Optional[Path], repo: Path) -> Processing:
     """One DataProcess for the metrics run, plus one for validation if it ran.
 
     Settings come from ``stimulus_metrics_provenance.json``, which the pipeline already
@@ -256,7 +273,7 @@ def build_processing(asset_dir: Path, sessions: List[Path], input_asset: Path,
         ),
     )]
 
-    validation = _validation_summary(results_dir)
+    validation = _validation_summary(validation_dir)
     if validation is not None:
         processes.append(DataProcess(
             name="Validation",
@@ -275,11 +292,21 @@ def build_processing(asset_dir: Path, sessions: List[Path], input_asset: Path,
     return Processing(data_processes=processes)
 
 
-def _validation_summary(results_dir: Optional[Path]) -> Optional[Dict[str, Any]]:
-    """Headline numbers from the validation run, if one is present beside the asset."""
-    if results_dir is None:
+def _validation_summary(validation_dir: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """Headline numbers from the validation run, if one is present.
+
+    Takes the validation output directory itself. It used to take the results directory
+    and append the run name, which could never match: the validation notebook writes to
+    `/scratch` — deliberately, so its artifacts are not part of the asset — while
+    `--results-dir` was `/results`. The lookup silently missed and the first full run
+    shipped a `processing.json` describing only the metrics step.
+    """
+    if validation_dir is None:
         return None
-    checks = results_dir / "v1dd_stimulus_metrics_validation" / "checks"
+    checks = validation_dir / "checks"
+    if not checks.is_dir() and (validation_dir / "v1dd_stimulus_metrics_validation").is_dir():
+        # Tolerate being handed the directory above, which is what the old flag meant.
+        checks = validation_dir / "v1dd_stimulus_metrics_validation" / "checks"
     verdict, tests = checks / "validation.json", checks / "tests.json"
     if not verdict.is_file():
         return None
@@ -316,7 +343,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--input-asset", required=True, type=Path,
                     help="mounted NWB asset root, e.g. /data/409828_V1DD_Filtered")
     ap.add_argument("--results-dir", type=Path, default=None,
-                    help="run directory above the asset, read for validation artifacts")
+                    help="run directory above the asset (kept for compatibility; prefer "
+                         "--validation-dir)")
+    ap.add_argument("--validation-dir", type=Path, default=None,
+                    help="validation output directory, e.g. "
+                         "/scratch/v1dd_stimulus_metrics_validation; if it holds "
+                         "checks/validation.json a second DataProcess records it")
     ap.add_argument("--start-time", default=None,
                     help="ISO start of the run; derived from the provenance if omitted")
     ap.add_argument("--experimenters", nargs="*", default=None,
@@ -362,7 +394,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # --- processing
     proc = build_processing(asset_dir, sessions, args.input_asset, experimenters,
-                            start_time, args.results_dir, repo)
+                            start_time, args.validation_dir or args.results_dir, repo)
     proc.write_standard_file(output_directory=asset_dir)
     log.info("wrote processing.json (%d process(es))", len(proc.data_processes))
 

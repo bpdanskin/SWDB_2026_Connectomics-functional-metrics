@@ -15,6 +15,7 @@ a laptop run reports them as skipped rather than drowning the real signal in red
 """
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable, List
@@ -32,6 +33,31 @@ for _group in ("utils", "validation"):
 
 class SkipTest(Exception):
     """Raised when a test needs data that is not mounted here."""
+
+
+def _skip_is_not_failure(exc_type, exc, tb):
+    """Make `SkipTest -> exit 2` hold wherever it is raised, not just inside `main`.
+
+    These tests are flat scripts, so `require_dataset` is naturally called at module
+    scope — above any function `main` could wrap. An uncaught exception there exits 1,
+    which `run_all.py` reads as a failure. That is exactly what happened on the first
+    reproducible run: the reference tables were not attached to the capsule, the skip
+    became a red FAIL, and the validation notebook told the reader not to trust an asset
+    that was in fact clean. An excepthook fixes every test at once and cannot be
+    forgotten by the next one.
+    """
+    if isinstance(exc, SkipTest):
+        print(f"  SKIP  {exc}")
+        # `os._exit` rather than `SystemExit`: the interpreter is already unwinding by the
+        # time an excepthook runs, so raising here prints "Error in sys.excepthook" and
+        # still exits 1. Flush first -- `os._exit` skips buffer teardown.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(2)
+    sys.__excepthook__(exc_type, exc, tb)
+
+
+sys.excepthook = _skip_is_not_failure
 
 
 #: Names of the checks that failed, in order. Tests append via `check`.
