@@ -12,6 +12,10 @@
 		{
 			"id": "2e02e089-3c5d-4de6-aa79-6d4723ebb663",
 			"mount": "409828_V1DD_Filtered"
+		},
+		{
+			"id": "4c3a2e8c-7b1c-421c-a4bf-5930806f3e67",
+			"mount": "409828_V1DD_stimulus_metrics"
 		}
 	]
 }
