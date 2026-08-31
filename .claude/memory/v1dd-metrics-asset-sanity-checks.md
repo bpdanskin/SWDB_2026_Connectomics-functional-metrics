@@ -1,0 +1,115 @@
+---
+name: v1dd-metrics-asset-sanity-checks
+description: "What to verify when the full 7 h stimulus-metrics run returns — expected numbers, the diff that should appear, and the three provenance defects the first reproducible run exposed."
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 0d22f3a0-6d85-4363-9e71-37a1e3b3d45c
+  modified: 2026-08-17T04:40:18.659Z
+---
+
+Checklist for the V1DD stimulus-metrics pipeline. Baseline: the `02d0fca` run
+(2026-08-16 04:16). **The first reproducible run (2026-08-16 19:40) passed every number
+below** — the diff against the baseline was exactly `+pika_roi_confidence` on all seven
+tables with zero changed columns at `atol=0`. What it did *not* pass is in
+"What the first reproducible run got wrong" at the bottom; all three are fixed and none
+touches a metric.
+
+## Expected shape
+
+| | |
+|---|---|
+| sessions / planes / ROIs | **25 / 150 / 39,407** |
+| wide table | **39,407 x 57** (56 before the confidence column) |
+| per-family CSVs | 7, each 39,407 rows |
+| runtime | ~7.2 h (~2.2 min/plane; drifting gratings is 96 % of it) |
+| `complete_asset` | `true`, `failed_sessions` empty |
+| `differs_from_reference_config` | exactly 3 entries |
+
+## The diff that should appear
+
+```bash
+python code/validation/diff_runs.py --last /results 409828_V1DD_stimulus_metrics
+```
+
+**Exactly `+pika_roi_confidence` on all seven files, zero changed columns.** Anything else
+moving is a defect: nothing in the confidence change touches a metric. If a metric moved,
+suspect an unintended config change before suspecting the data.
+
+## Numbers that should reproduce exactly
+
+* **Low-confidence ROIs: 1,038 (2.63 %), every one in column 4 volume 1** — 67 % of that
+  session's 1,550. They should now be identifiable directly by `pika_roi_confidence <= 0.5`
+  rather than inferred, and the two must agree row for row (P5 checks this).
+* **Depth lattice** `50 + 96*(volume-1) + 16*plane`, spanning 50–514 um, 30 distinct depths.
+* **`roi_unique_id` collides ~2.9x**: 13,555 distinct strings for 39,407 rows. `roi_key`
+  is unique. (Neither is in the per-family CSVs except `roi_unique_id`.)
+* **Receptive-field centres within ±32.55° altitude / ±60.45° azimuth** — the *corrected*
+  bounds. Seeing ±28.481 / ±56.132 would mean the historical scale shipped by mistake.
+* Validation integrity: **57/57** (54 plus the three confidence checks).
+* Unit tests: **17 files, 448 checks**, 16 passed + 1 skipped. `test_reference_tables.py`
+  skips whenever `data_frames` is not attached — which is normal, and **skip is not
+  failure**. (426 on the first reproducible run, before the metadata and entry-point
+  tests were added.)
+
+## Metadata sidecars
+
+Three files **inside** the asset directory, not beside it:
+`subject.json`, `data_description.json`, `processing.json`.
+
+* `data_description.data_level` = `derived`, `name` = the asset directory name,
+  `source_data` = all 25 input session names, `modalities` = pophys + behavior (not
+  behavior-videos), `tags` = the union of the inputs' Column/Volume tags.
+* `processing.json` = 2 processes (metrics, then validation) if validation ran, else 1.
+  `output_path` must be `"."`.
+* `subject.json` inherited verbatim, subject_id `409828`, breeding info intact.
+
+## What the first reproducible run got wrong
+
+Every metric was right; everything that failed was *around* the numbers. All three shared
+one cause — **they were invisible to the checks because the checks ran in a different
+shape than production**.
+
+1. **A skipped test reported as a failure.** `data_frames` is not attached to the capsule,
+   so `require_dataset` raised `SkipTest` — at module scope, above anything `harness.main`
+   could wrap. An uncaught exception exits 1, `run_all.py` read that as FAIL, and the
+   validation notebook told the reader not to trust a clean asset. Fixed with a
+   `sys.excepthook` in `harness.py`, so `SkipTest -> exit 2` now holds wherever it is
+   raised. It must use `os._exit(2)`: raising `SystemExit` from an excepthook prints
+   "Error in sys.excepthook" and still exits 1.
+2. **`processing.json` recorded one process instead of two.** Two independent bugs, either
+   alone sufficient. `metadata.py` ran *before* the validation notebook, so there was
+   nothing to record; and `_validation_summary` looked under `--results-dir` while the
+   notebook writes to `/scratch` on purpose. `test_metadata.py` built validation artifacts
+   inside the results dir — a layout production never has — so it passed throughout. Fixed
+   by a `--validation-dir` flag, reordering validation before metadata, and a `[2b]` test
+   case in the real shape.
+3. **`code.url` pointed at upstream and `commit_hash` was null.** The URL was hardcoded
+   from before the fork; upstream has none of this code. The null hash is structural: a
+   reproducible run copies `code/` without `.git`, so `git rev-parse` returns nothing.
+   `SWDB_CODE_VERSION` and `SWDB_CODE_URL` now override.
+
+   **Set `SWDB_CODE_VERSION` in the capsule environment before launching** — to
+   `git -C <fork> rev-parse HEAD`. `run_stimulus_metrics.py` now *refuses to start*
+   without it, so forgetting costs a second rather than seven hours. There is no bypass
+   flag on purpose: setting the variable to a value you choose is already the escape
+   hatch, and it is an honest one. The entry point is strict where `metadata.py` is
+   lenient — writing `null` and warning is right for a library, wrong for a published
+   asset. The CO capsule id is linked to the data asset, so nothing else CO injects needs
+   capturing.
+
+## What no automated check covers
+
+1. ~~Whether `aind-data-schema` installed.~~ **Resolved** — it resolved from
+   `environment/pyproject.toml` despite being absent from `uv.lock`, and all three sidecars
+   landed inside the asset directory.
+2. **Whether col4/vol1's 67 % low-confidence rate is expected.** See
+   [[v1dd-metrics-open-questions]] — this is a question for whoever produced the filtered
+   asset, not something the pipeline can answer.
+3. **Whether the checks run in production's shape.** The generalisation from defects 1-3:
+   all three passed their tests and failed in the capsule. When a test constructs a
+   directory layout, an attached dataset, or a git state, ask whether that is the one the
+   reproducible run actually has.
+
+Related: [[v1dd-metrics-refactor-decisions]] for why the corrections are what they are,
+[[v1dd-metrics-speedups]] before considering a faster rerun.

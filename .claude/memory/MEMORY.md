@@ -1,0 +1,10 @@
+- [The V1DD functional-metrics fork](v1dd-functional-metrics-fork.md) — where it lives, which remote is which, merging from upstream and PRing back.
+- [The user handles commits](user-handles-commits.md) — leave work uncommitted in the working tree; they inspect the diff first.
+- [Sanity checks for the metrics asset](v1dd-metrics-asset-sanity-checks.md) — the numbers a full run must reproduce; the first reproducible run passed them all and failed three provenance checks.
+- [V1DD metrics open questions](v1dd-metrics-open-questions.md) — deferred tuning, the unrecorded grating-window geometry, the 67%-low-confidence session, imperfections shipped on purpose.
+- [V1DD metrics speedups, deferred](v1dd-metrics-speedups.md) — von Mises fits are 96% of a 7.2 h run; half of them are discarded. Two unimplemented wins.
+- [V1DD metrics refactor decisions](v1dd-metrics-refactor-decisions.md) — the pipeline/validation split: all sessions, correct the known defects, mouse from the NWB.
+- [V1DD stimulus-metrics port status](v1dd-stimulus-metrics-port-status.md) — complete; the milestone record and the two-seed control methodology.
+- [Response windows: match now, tune later](response-window-deferred-tuning.md) — recovered values (DG 2.0 s, NI 0.33 s) and why windows behave as discrete sample counts.
+- [AIND metadata for derived assets](aind-metadata-for-derived-assets.md) — working recipe + aind-data-schema 2.8.1 gotchas; reuse for the next data asset.
+- [Code Ocean reproducible-run blockers](co-reproducible-run-blockers.md) — all three resolved for this pipeline; the CAVE one still open elsewhere.
