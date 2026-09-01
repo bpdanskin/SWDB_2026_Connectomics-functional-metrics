@@ -6,5 +6,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG GIT_ASKPASS
 COPY git-ask-pass /
 
+ENV SWDB_CODE_VERSION = 17cacea5a61c6b596324d6911a879b15f3ed98c4
+
 COPY pyproject.toml /tmp/pyproject.toml
 RUN uv pip install --system --no-cache -r /tmp/pyproject.toml
