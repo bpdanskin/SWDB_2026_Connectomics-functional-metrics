@@ -88,7 +88,7 @@ check("mouse column is the M-prefixed label", set(f["mouse"]) == {"M409828"})
 check("roi_unique_id omits the column (historical format)",
       f["roi_unique_id"].iloc[0] == "M409828_3_2_0", f["roi_unique_id"].iloc[0])
 check("roi_key includes the column, so it does not collide",
-      f["roi_key"].iloc[0] == "M409828_13_2_0", f["roi_key"].iloc[0])
+      f["roi_key"].iloc[0] == "M409828_1_3_2_0", f["roi_key"].iloc[0])
 check("depth_um present and float", f["depth_um"].dtype == float and set(f["depth_um"]) == {150.0})
 check("explicit mouse= overrides the plane",
       set(sm.roi_frame(fake_plane(), mouse="M999999")["mouse"]) == {"M999999"})

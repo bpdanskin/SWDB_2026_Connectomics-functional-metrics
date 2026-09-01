@@ -1,15 +1,18 @@
 ---
 name: v1dd-metrics-open-questions
-description: "Deliberately unresolved questions about the V1DD stimulus metrics — deferred choices, two things the next run should capture (grating-window geometry, per-cell RF maps), an upstream data question, and imperfections shipped on purpose."
+description: "Open questions about the V1DD stimulus metrics — response window tuning, the 67%-low-confidence session, imperfections shipped on purpose. Grating-window geometry and RF map export are now implemented."
 metadata: 
   node_type: memory
   type: project
   originSessionId: 0d22f3a0-6d85-4363-9e71-37a1e3b3d45c
-  modified: 2026-08-25T18:53:57.257Z
+  modified: 2026-09-01T00:00:00.000Z
 ---
 
 Things left open as of 2026-08-16, each on purpose. None is a bug to fix unprompted; each
 is a decision waiting on either evidence or the user.
+
+**Status update 2026-09-01:** Items 1 (grating-window geometry) and 3 (RF map export)
+are now implemented and ready for the next run. See details below.
 
 ## Response windows were matched, not chosen
 
@@ -36,7 +39,7 @@ whoever produced the filtered NWB asset, not something the metrics pipeline can 
 Until then a population average over all ROIs is weighted by one session's segmentation
 quality — the access notebook says so, and the column now makes it filterable.
 
-## The windowed-grating window is not recorded anywhere — grab it on the next run
+## The windowed-grating window is now captured ✓ DONE (2026-09-01)
 
 `ssi_*` compares the windowed grating response against the full-field one, but nothing in
 the asset says **where the window was or how big it was**. So the index cannot be
@@ -60,20 +63,24 @@ What was established 2026-08-24, from `checks/schema_report.json`:
 * **Diameter is absent from the NWB stimulus table entirely** — there is no size column.
   It has to come from acquisition-side metadata.
 
-Three small changes on the next fresh run, none urgent:
+**All three sub-items implemented 2026-09-01:**
 
-1. `preflight.py`, `_stimulus_coverage`: add `center_azimuth` / `center_elevation` beside
-   the `direction` / `spatial_frequency` / `temporal_frequency` collection. Two lines, and
-   it answers the per-column question for all 25 sessions permanently. **Nothing we built
-   reads those columns today**, which is why this is still unknown.
-2. `stimulus_metrics.surround_suppression_metrics`: carry the centre into the output as
-   `dgw_center_azimuth` / `dgw_center_elevation` (per-session constants, one column each).
-3. Then containment is computable per ROI against the `rf_metrics` centres
-   (`azimuth_rf_on`, `altitude_rf_on`), which are already in the same degree frame. Worth
-   testing whether `ssi` falls off with RF-to-window distance — if it does, some of the
-   published index is alignment rather than physiology.
+1. `preflight.py` `_stimulus_coverage`: now collects `center_azimuth` / `center_elevation`
+   for `drifting_gratings_windowed` rows.
+2. `surround_suppression_metrics` now emits `dgw_center_azimuth` / `dgw_center_elevation`
+   per-ROI (session constants); `OUTPUT_COLUMNS["surround_supression_index"]` updated.
+3. `DGResult` has a new `center: Tuple[float, float]` field; `drifting_gratings_metrics`
+   extracts it from the non-blank windowed trials.
 
-## The per-cell 2D receptive-field map is computed and thrown away
+Diameter (size of the aperture) is still absent — it has to come from acquisition-side
+metadata and is not in the NWB stimulus table. The per-session centre is now in the asset;
+containment testing against `rf_metrics` centres is now possible.
+
+## The per-cell 2D receptive-field map is now exported ✓ DONE (2026-09-01)
+
+**Implemented 2026-09-01.** `receptive_field_metrics` now returns `(df, rf_map)` where
+`rf_map` is `(n_rois, 2, n_rows, n_cols)` float32 — the pre-threshold continuous fraction.
+The notebook saves `rf_maps_M{mouse}.npz` with `roi_key`, `altitudes`, `azimuths`, `seed`.
 
 We report only the ON/OFF **centres** and `has_rf_*`, but the full per-ROI subfield map —
 the thing you would plot as an 8x14 ON panel beside an 8x14 OFF panel — is already built

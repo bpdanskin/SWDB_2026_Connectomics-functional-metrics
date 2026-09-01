@@ -33,7 +33,7 @@ Three facts about the original that are easy to get wrong, all verified against 
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -201,7 +201,8 @@ OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
         "pika_roi_confidence",
         "ssi", "ssi_avg", "ssi_avg_at_pref_sf", "ssi_running",
         "ssi_running_avg_at_pref_sf", "ssi_stationary",
-        "ssi_stationary_avg_at_pref_sf", "ssi_tuning_fit"],
+        "ssi_stationary_avg_at_pref_sf", "ssi_tuning_fit",
+        "dgw_center_azimuth", "dgw_center_elevation"],
     "rf_metrics": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "pika_roi_confidence",
@@ -238,7 +239,7 @@ def roi_frame(plane, mouse: Optional[str] = None) -> pd.DataFrame:
     return pd.DataFrame({
         "roi_unique_id": [f"M{mouse_num}_{plane.volume}_{plane.plane}_{r}" for r in plane.roi],
         "roi_key": [
-            f"M{mouse_num}_{plane.column}{plane.volume}_{plane.plane}_{r}" for r in plane.roi
+            f"M{mouse_num}_{plane.column}_{plane.volume}_{plane.plane}_{r}" for r in plane.roi
         ],
         "mouse": [mouse] * n,
         "column": np.full(n, plane.column, dtype=int),
@@ -454,6 +455,8 @@ class DGResult:
     dir_list: np.ndarray
     sf_list: np.ndarray
     blank_responses: np.ndarray           # (n_rois, n_blank)
+    center: Tuple[float, float] = field(default_factory=lambda: (np.nan, np.nan))
+    # (center_azimuth_deg, center_elevation_deg) of the grating aperture; NaN for full-field
 
 
 def vonmises_two_peak(x, scale_1, k_1, x0, scale_2, k_2, b):
@@ -539,6 +542,7 @@ def drifting_gratings_metrics(
     running: Optional[Sequence[np.ndarray]] = None,
     *,
     dg_type: str = "full",
+    fit_sf_index: Optional[np.ndarray] = None,
     config: MetricConfig = DEFAULT_CONFIG,
     rng: Optional[np.random.Generator] = None,
     mouse: Optional[str] = None,
@@ -576,6 +580,15 @@ def drifting_gratings_metrics(
     sweeps = tr.sweep_responses(traces, plane.timestamps, starts, window, None)
 
     grat = trials.loc[~is_blank]
+
+    # per-session grating-aperture centre (NaN for full-field, which uses (0, 0) placeholders)
+    az_vals = grat["center_azimuth"].dropna().unique() if "center_azimuth" in grat.columns else []
+    el_vals = grat["center_elevation"].dropna().unique() if "center_elevation" in grat.columns else []
+    center: Tuple[float, float] = (
+        float(az_vals[0]) if len(az_vals) else np.nan,
+        float(el_vals[0]) if len(el_vals) else np.nan,
+    )
+
     dir_list = np.sort(grat["direction"].dropna().unique())
     sf_list = np.sort(grat["spatial_frequency"].dropna().unique())
     if len(dir_list) != 12:
@@ -676,16 +689,32 @@ def drifting_gratings_metrics(
         trs = tr.trial_array(per_sweep, code, n_trials=n_trials,
                              n_conditions=n_dir * n_sf).reshape(n_dir, n_sf, n_trials)
 
-    # von Mises fits, one per (ROI, spatial frequency)
+    # von Mises fits, one per (ROI, spatial frequency).
+    # fit_sf_index: per-ROI SF index to fit (0..n_sf-1), skipping the other.
+    # Windowed self-selects its own preferred SF — the only one SSI reads from it.
+    # Full field must receive dgw.pref_cond_index[:, 1] from the caller, since SSI
+    # reads dgf.tuning_params[roi, si] where si = dgw's preferred SF.
+    # None → windowed auto-selects; for full field, all SFs are fitted (original behaviour).
     tuning_params = np.full((n_rois, n_sf, 6), np.nan)
     if config.fit_tuning_curves:
+        _fit_sf = fit_sf_index
+        if _fit_sf is None and dg_type == "windowed":
+            _fit_sf = pref_cond_index[:, 1]   # self-select: saves ~half of windowed fits
         for roi in range(n_rois):
             if not plane.is_valid[roi]:
                 continue
-            for sf_i in range(n_sf):
+            if _fit_sf is not None:
+                sf_i = int(_fit_sf[roi])
+                if sf_i < 0:
+                    continue
                 p = vonmises_two_peak_fit(dir_list, mean_tr[roi, :, sf_i])
                 if p is not None:
                     tuning_params[roi, sf_i] = p
+            else:
+                for sf_i in range(n_sf):
+                    p = vonmises_two_peak_fit(dir_list, mean_tr[roi, :, sf_i])
+                    if p is not None:
+                        tuning_params[roi, sf_i] = p
 
     out = roi_frame(plane, mouse=mouse)
     out["dsi"] = dsi
@@ -702,7 +731,8 @@ def drifting_gratings_metrics(
 
     return DGResult(metrics=out, trial_responses=ta, trial_running_speeds=trs,
                     pref_cond_index=pref_cond_index, tuning_params=tuning_params,
-                    dir_list=dir_list, sf_list=sf_list, blank_responses=blank)
+                    dir_list=dir_list, sf_list=sf_list, blank_responses=blank,
+                    center=center)
 
 
 # ------------------------------------------------------------ surround suppression
@@ -779,6 +809,10 @@ def surround_suppression_metrics(
     frame = roi_frame(plane, mouse=mouse)
     for k, v in out.items():
         frame[k] = v
+    # grating-aperture centre carried through so consumers can filter by RF containment
+    az, el = dgw.center
+    frame["dgw_center_azimuth"] = np.full(n_rois, az)
+    frame["dgw_center_elevation"] = np.full(n_rois, el)
     return frame
 
 
@@ -934,14 +968,16 @@ def receptive_field_metrics(
     -1 / 0 / 1 where the original assumed 0 / 127 / 255, and hard-coding those would make
     both design matrices all-False and report zero receptive fields for every ROI.
     """
+    images = np.asarray(lsn["images"])
+    n_rows, n_cols = images.shape[1], images.shape[2]
+
     if not len(trials):
-        return absent_frame(plane, "rf_metrics", mouse)
+        empty_map = np.zeros((plane.n_rois, 2, n_rows, n_cols), dtype=np.float32)
+        return absent_frame(plane, "rf_metrics", mouse), empty_map
     rng = np.random.default_rng() if rng is None else rng
     traces = plane.traces[config.trace_type["locally_sparse_noise"]]
     window = (0.0, config.lsn_response_frames * plane.dt)
     baseline = (-1.0, 0.0)
-
-    images = np.asarray(lsn["images"])
     pixel_on, pixel_off = lsn.get("pixel_on"), lsn.get("pixel_off")
     if pixel_on is None or pixel_off is None:
         raise ValueError(
@@ -959,7 +995,6 @@ def receptive_field_metrics(
             f"frame index {frames.max()} exceeds the {len(images)}-frame template"
         )
 
-    n_rows, n_cols = images.shape[1], images.shape[2]
     n_pixels = n_rows * n_cols
 
     # (2 * n_pixels, n_sweeps): rows 0..n_pixels-1 are ON, the rest OFF. Gray is neither.
@@ -981,8 +1016,12 @@ def receptive_field_metrics(
         frac = (design.astype(np.int64) @ significant).T / np.where(
             n_pixel_trials > 0, n_pixel_trials, np.nan)
     frac = np.nan_to_num(frac, nan=0.0)
+    frac[~plane.is_valid] = 0.0   # blank = excluded (not "no RF"), documented in rf_map
+    # continuous pre-threshold map: (n_rois, 2, n_rows, n_cols) float32.
+    # Graded values before zeroing sub-threshold pixels; recoverable to post-threshold
+    # in one line, but the reverse is not. Saved alongside the per-ROI metrics.
+    rf_map = frac.reshape(plane.n_rois, 2, n_rows, n_cols).astype(np.float32).copy()
     frac[frac < config.rf_frac_thresh] = 0.0
-    frac[~plane.is_valid] = 0.0
     rf = frac.reshape(plane.n_rois, 2, n_rows, n_cols)          # dim 1: 0 = ON, 1 = OFF
 
     mask = rf > 0
@@ -1009,4 +1048,4 @@ def receptive_field_metrics(
     out["altitude_rf_on"] = np.where(has_on, alt[:, 0], np.nan)
     out["azimuth_rf_off"] = np.where(has_off, azi[:, 1], np.nan)
     out["altitude_rf_off"] = np.where(has_off, alt[:, 1], np.nan)
-    return out
+    return out, rf_map

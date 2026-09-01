@@ -100,7 +100,7 @@ check("pref_img is int", pd.api.types.is_integer_dtype(pub.pref_img))
 check("volume is str", isinstance(pub.volume.iloc[0], str))
 check("roi_unique_id drops the column (published format)",
       pub.roi_unique_id.iloc[0]=="M409828_3_0_0", pub.roi_unique_id.iloc[0])
-check("roi_key keeps it (non-colliding)", out.roi_key.iloc[0]=="M409828_13_0_0", out.roi_key.iloc[0])
+check("roi_key keeps it (non-colliding)", out.roi_key.iloc[0]=="M409828_1_3_0_0", out.roi_key.iloc[0])
 
 print("\n[4] lifetime sparseness chunking matches the tested reference")
 ta = RNG.gamma(1.0,1.0,size=(40,6,7)); ta[RNG.random(ta.shape)<0.1]=np.nan

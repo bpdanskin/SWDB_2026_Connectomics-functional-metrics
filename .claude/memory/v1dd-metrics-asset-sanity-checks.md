@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 0d22f3a0-6d85-4363-9e71-37a1e3b3d45c
-  modified: 2026-08-17T04:40:18.659Z
+  modified: 2026-09-01T00:00:00.000Z
 ---
 
 Checklist for the V1DD stimulus-metrics pipeline. Baseline: the `02d0fca` run
@@ -20,7 +20,7 @@ touches a metric.
 | | |
 |---|---|
 | sessions / planes / ROIs | **25 / 150 / 39,407** |
-| wide table | **39,407 x 57** (56 before the confidence column) |
+| wide table | **39,407 x 59** (57 before adding `dgw_center_azimuth`/`dgw_center_elevation`) |
 | per-family CSVs | 7, each 39,407 rows |
 | runtime | ~7.2 h (~2.2 min/plane; drifting gratings is 96 % of it) |
 | `complete_asset` | `true`, `failed_sessions` empty |
@@ -32,9 +32,13 @@ touches a metric.
 python code/validation/diff_runs.py --last /results 409828_V1DD_stimulus_metrics
 ```
 
-**Exactly `+pika_roi_confidence` on all seven files, zero changed columns.** Anything else
-moving is a defect: nothing in the confidence change touches a metric. If a metric moved,
-suspect an unintended config change before suspecting the data.
+**`+dgw_center_azimuth` and `+dgw_center_elevation` on `surround_supression_index`,
+zero other changed columns.** These are the new columns from the 2026-09-01 changes.
+No existing metric values should move — these are new additions only.
+
+**Note on `roi_key`:** The format changed 2026-09-01 (column and volume now
+underscore-separated). If diffing against a pre-2026-09-01 asset, `roi_key` values in the
+wide feather will not match; this is expected and cosmetic.
 
 ## Numbers that should reproduce exactly
 
@@ -43,14 +47,15 @@ suspect an unintended config change before suspecting the data.
   rather than inferred, and the two must agree row for row (P5 checks this).
 * **Depth lattice** `50 + 96*(volume-1) + 16*plane`, spanning 50–514 um, 30 distinct depths.
 * **`roi_unique_id` collides ~2.9x**: 13,555 distinct strings for 39,407 rows. `roi_key`
-  is unique. (Neither is in the per-family CSVs except `roi_unique_id`.)
+  is unique — format `M{mouse}_{column}_{volume}_{plane}_{roi}` (e.g. `M409828_1_3_2_0`;
+  column and volume separated by underscore, changed 2026-09-01 from `M409828_13_2_0`).
+  (Neither is in the per-family CSVs except `roi_unique_id`.)
 * **Receptive-field centres within ±32.55° altitude / ±60.45° azimuth** — the *corrected*
   bounds. Seeing ±28.481 / ±56.132 would mean the historical scale shipped by mistake.
 * Validation integrity: **57/57** (54 plus the three confidence checks).
-* Unit tests: **17 files, 448 checks**, 16 passed + 1 skipped. `test_reference_tables.py`
+* Unit tests: **17 files, 453 checks**, 16 passed + 1 skipped. `test_reference_tables.py`
   skips whenever `data_frames` is not attached — which is normal, and **skip is not
-  failure**. (426 on the first reproducible run, before the metadata and entry-point
-  tests were added.)
+  failure**. (448 before the 5 new rf_map shape/dtype/value checks added 2026-09-01.)
 
 ## Metadata sidecars
 

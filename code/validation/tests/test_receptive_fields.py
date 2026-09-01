@@ -78,8 +78,8 @@ plane = vn.PlaneData(mouse_id="409828", depth_um=150.0, column=1, volume="3", pl
 cfg = sm.MetricConfig(other_n_boot=2000)
 
 print("[1] receptive_field_metrics")
-out = sm.receptive_field_metrics(plane, trials, (spont_start, spont_stop), lsn,
-                                 config=cfg, rng=np.random.default_rng(0))
+out, rf_map = sm.receptive_field_metrics(plane, trials, (spont_start, spont_stop), lsn,
+                                         config=cfg, rng=np.random.default_rng(0))
 check("one row per ROI", len(out) == N_ROIS)
 check("has the published columns",
       {"has_rf_on", "has_rf_off", "has_rf_on_or_off", "azimuth_rf_on", "altitude_rf_on",
@@ -102,7 +102,7 @@ check("azimuth matches the target pixel",
       f"{out.azimuth_rf_on[0]:.4f} vs {azimuths[TARGET_C]:.4f}")
 
 # ...and the historical config still lands where the old tables put it.
-hist = sm.receptive_field_metrics(
+hist, _ = sm.receptive_field_metrics(
     plane, trials, (spont_start, spont_stop), lsn,
     config=sm.MetricConfig(other_n_boot=2000, rf_center_scale_bug=True),
     rng=np.random.default_rng(0))
@@ -139,8 +139,8 @@ check("the flag changes the centres but not which ROIs have an RF",
 
 print("\n[4] the pixel encoding, which is where a literal port breaks")
 wrong = dict(lsn, pixel_on=255, pixel_off=0)      # the original's hard-coded constants
-wrong_out = sm.receptive_field_metrics(plane, trials, (spont_start, spont_stop), wrong,
-                                       config=cfg, rng=np.random.default_rng(0))
+wrong_out, _ = sm.receptive_field_metrics(plane, trials, (spont_start, spont_stop), wrong,
+                                           config=cfg, rng=np.random.default_rng(0))
 # 255 matches nothing here, so every ON field silently disappears
 check("hard-coded pixel_on=255 erases every ON receptive field",
       not wrong_out.has_rf_on.any(),
@@ -164,7 +164,22 @@ try:
 except ValueError as e:
     check("raises when the codes cannot be determined", "pixel codes" in str(e))
 
-print("\n[5] guardrails and schema")
+print("\n[5] rf_map shape and dtype")
+check("rf_map shape is (n_rois, 2, rows, cols)",
+      rf_map.shape == (N_ROIS, 2, ROWS, COLS), str(rf_map.shape))
+check("rf_map dtype is float32", rf_map.dtype == np.float32, str(rf_map.dtype))
+check("rf_map values are in [0, 1]",
+      float(rf_map.min()) >= 0.0 and float(rf_map.max()) <= 1.0,
+      f"min={rf_map.min():.4f} max={rf_map.max():.4f}")
+check("rf_map for selective ROI is non-zero at the target pixel",
+      rf_map[0, 0, TARGET_R, TARGET_C] > 0,
+      f"{rf_map[0, 0, TARGET_R, TARGET_C]:.4f}")
+check("empty rf_map returned when trials are absent",
+      sm.receptive_field_metrics(
+          plane, trials.iloc[:0], (spont_start, spont_stop), lsn, config=cfg)[1].shape
+      == (N_ROIS, 2, ROWS, COLS))
+
+print("\n[6] guardrails and schema")
 bad = trials.copy()
 bad.loc[0, "frame"] = 9999.0
 try:

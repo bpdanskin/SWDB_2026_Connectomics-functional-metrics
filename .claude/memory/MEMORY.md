@@ -2,7 +2,7 @@
 - [The user handles commits](user-handles-commits.md) — leave work uncommitted in the working tree; they inspect the diff first.
 - [Sanity checks for the metrics asset](v1dd-metrics-asset-sanity-checks.md) — the numbers a full run must reproduce; the first reproducible run passed them all and failed three provenance checks.
 - [V1DD metrics open questions](v1dd-metrics-open-questions.md) — deferred tuning, the unrecorded grating-window geometry, the 67%-low-confidence session, imperfections shipped on purpose.
-- [V1DD metrics speedups, deferred](v1dd-metrics-speedups.md) — von Mises fits are 96% of a 7.2 h run; half of them are discarded. Two unimplemented wins.
+- [V1DD metrics speedups](v1dd-metrics-speedups.md) — speedup 1 (fit only used SF, ~2x) implemented 2026-09-01; speedup 2 (data-derived p0) still deferred.
 - [V1DD metrics refactor decisions](v1dd-metrics-refactor-decisions.md) — the pipeline/validation split: all sessions, correct the known defects, mouse from the NWB.
 - [V1DD stimulus-metrics port status](v1dd-stimulus-metrics-port-status.md) — complete; the milestone record and the two-seed control methodology.
 - [Response windows: match now, tune later](response-window-deferred-tuning.md) — recovered values (DG 2.0 s, NI 0.33 s) and why windows behave as discrete sample counts.

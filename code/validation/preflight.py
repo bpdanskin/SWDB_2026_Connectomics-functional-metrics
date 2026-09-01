@@ -229,6 +229,11 @@ def _stimulus_coverage(nwb) -> Dict[str, Any]:
                     entry[c] = _plain(vals)
                     if isinstance(vals, list):
                         entry[f"n_{c}"] = len(vals)
+                if fam == "drifting_gratings_windowed":
+                    for c in ("center_azimuth", "center_elevation"):
+                        vals = _probe(lambda c=c: sorted(
+                            pd.to_numeric(rows[c], errors="coerce").dropna().unique().tolist()))
+                        entry[c] = _plain(vals)
             elif fam.startswith("natural_images"):
                 vals = _probe(lambda: pd.to_numeric(rows["image_index"], errors="coerce")
                               .dropna().unique())
