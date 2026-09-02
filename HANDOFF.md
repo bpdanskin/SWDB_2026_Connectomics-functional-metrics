@@ -1,8 +1,9 @@
 # Handoff — V1DD stimulus metrics
 
-Written 2026-08-31 to carry context from a long desktop Claude Code session into sessions
-running elsewhere (Code Ocean, Claude Code on the web). Those environments clone this
-repo and see nothing of the local machine, so anything they need has to live here.
+Written 2026-08-31, updated 2026-09-01 after the second reproducible run. Carries context
+between sessions running in different places (desktop, Code Ocean, Claude Code on the
+web). Those environments clone this repo and see nothing of each other's machines, so
+anything they need has to live here.
 
 **Read this first, then `.claude/memory/` for depth.** This file is the map; the memory
 files are the territory, and each one goes deeper than the section that points at it.
@@ -16,9 +17,10 @@ stimulus-analysis pipeline onto the published NWB assets. The original read a pr
 Isilon HDF5 tree that no longer exists; this reproduces its seven metric tables from the
 NWB-Zarr sessions mounted in Code Ocean.
 
-**The port is complete and has shipped an asset.** What remains is tuning, efficiency,
-and two data-capture additions — all listed under [Open work](#open-work). None of it is
-a bug hunt.
+**The port is complete and has shipped two assets.** The 2026-09-01 run added the two
+data-capture items that were previously open (window geometry, per-cell RF maps) and the
+output-neutral speedup. What remains is response-window tuning, one more speedup, and
+**three provenance defects introduced by this run** — see [Open work](#open-work).
 
 ---
 
@@ -104,27 +106,105 @@ Needs numpy/pandas, so it will not run in a bare environment. In the capsule:
 python code/validation/tests/run_all.py
 ```
 
-Expect **16 passed + 1 skipped, 448 checks**. `test_reference_tables.py` skips whenever
-the `data_frames` asset is not attached — **skip is not failure**, and `harness.py`
-installs a `sys.excepthook` so `SkipTest -> exit 2` holds even at module scope.
+As of 2026-09-01 this reports **15 passed, 1 skipped, 1 failed — 451 checks**, and the
+failure is a defect in the test rather than in the pipeline (see Open work). Before it,
+16 passed + 1 skipped. `test_reference_tables.py` skips whenever the `data_frames` asset
+is not attached — **skip is not failure**, and `harness.py` installs a `sys.excepthook`
+so `SkipTest -> exit 2` holds even at module scope.
 
 ---
 
 ## The shipped asset
 
-`results/409828_V1DD_stimulus_metrics_2026-08-16_19-40-03/`
+**Current: `results/409828_V1DD_stimulus_metrics_2026-09-01_07-37-53/`.** The
+`2026-08-16_19-40-03` run is kept beside it as the baseline `diff_runs.py` compares
+against.
 
 | | |
 |---|---|
 | sessions / planes / ROIs | 25 / 150 / **39,407** |
-| wide table | `stimulus_metrics_M409828.feather`, 39,407 x 57 |
+| wide table | `stimulus_metrics_M409828.feather` |
 | per-family CSVs | 7, each 39,407 rows, historical column order |
-| runtime | ~7.2 h (~2.2 min/plane; drifting gratings is 96 % of it) |
+| **new in this run** | `rf_maps_M409828.npz` (6.2 MB) — the per-ROI RF maps |
+| runtime | **4.83 h** (17,400.6 s), down from ~7.2 h |
+| seed | 0; no seed-B recomputation this run |
 | sidecars | `subject.json`, `data_description.json`, `processing.json` — **inside** the asset dir |
 
 The asset covers a complete 5x5 grid: columns 1-5 x volumes 1-5, all 2-photon, 6 planes
 each. No 3-photon sessions and no letter volumes, so the "harden for missing stimuli"
 work never became blocking.
+
+### What the 2026-09-01 run added
+
+- **`dgw_center_azimuth` / `dgw_center_elevation`** in the SSI table and the wide feather.
+- **`rf_maps_M409828.npz`** — `rf_maps` (39,407 x 2 x 8 x 14 float32, dim 1 is ON/OFF),
+  `roi_key`, `altitudes`, `azimuths`, `seed`. Exported pre-threshold, as planned.
+- **Speedup 1** (fit only the SF that gets read), which is why the run is ~2.4 h shorter.
+  Predicted ~3.6 h; came in at 4.83 h, so the fit is a smaller share of the total than
+  the single-plane profile implied.
+- `format` is now populated per session in provenance (it was null before).
+
+### What this run did NOT check
+
+`VALIDATION_SESSIONS` was empty and the `data_frames` reference asset was not attached, so
+**no fidelity comparison against published tables and no seed-to-seed floor ran**. The
+integrity checks (57/57) and the unit tests did run and cover every row. The agreement
+numbers quoted anywhere in this file are still from the M1-M7 validation, not from this
+run.
+
+### The windowed-grating window position, now known for all 25 sessions
+
+The open question — does the window move per column? — is answered. **It is fixed per
+column and constant across that column's volumes:**
+
+| column | azimuth | elevation |
+|---|---|---|
+| 1 | -8.9 | -12.4 |
+| 2 | -19.6 (volume 2: **-19.8**) | -10.0 |
+| 3 | +1.8 | -9.7 |
+| 4 | -15.4 | -16.4 |
+| 5 | +9.9 | -14.4 |
+
+Two things to know before using it:
+
+- **Column 2 / volume 2 differs by 0.2 deg** from the rest of its column. Retargeting
+  jitter, not a different window, but do not assume exact equality within a column.
+- **Two sessions ship no centre at all** — column 2 / volume 5 (906 ROIs) and column 4 /
+  volume 1 (1,550 ROIs). Both have complete SSI and DGW data, so the stimulus ran; only
+  the recorded position is missing. **2,456 ROIs therefore cannot be filtered for RF
+  containment.** Column 4 / volume 1 is also the 67 %-low-confidence session, which is
+  probably coincidence — the two problems have nothing mechanically in common.
+
+**The diameter is 30 degrees (15 degree radius)** — from the V1DD white paper, not from the
+NWB, which records no size. The paper also gives the reason for the per-column position:
+the window was placed to align with each column's population receptive field.
+
+So containment is now computable, and the answer is in two halves. **Two thirds of cells
+with a measured RF were probed by a window centred more than 15 degrees away** (67.1 % in
+column 1), leaving only 970 ROIs — 2.5 % of the asset — where `ssi` is cleanly
+interpretable. **But `ssi` does not track that distance** (r = -0.03, binned means flat to
+beyond 37 degrees), and a targeting miss would push it negative, which never appears.
+
+The distance test is probably just too blunt: RF pixels are 9.3 degrees, so a 30-degree
+window spans about three of them and a centre two pixels off still overlaps. Worked
+through in the access notebook.
+
+**Both measures are now computed by the pipeline** — `sm.window_containment` emits
+`dgw_rf_distance_on/off` and `dgw_rf_overlap_on/off` into the SSI table (not yet in a
+shipped asset; needs the next run). Overlap is weighted by the **post-threshold** map:
+the continuous pre-threshold map averages 0.086 overlap against the 0.073 a uniform
+random map gives, so it mostly measures the window's share of the screen. Overlap is the
+better measure — right sign, r = +0.07 against `ssi`, and far more permissive (1,572
+cells at a 0.05 cut versus 970 for the centre test; 190 versus 110 in the coregistered
+sessions). **Neither is used as a filter**, deliberately: the correlation is weak and the
+binned profile is non-monotonic, so gating would discard most of the data on thin
+evidence.
+
+Receptive fields now run **first** in the per-plane loop so the maps exist when surround
+suppression is assembled. That reorder is numerically free because `rng` is a factory
+returning a freshly seeded generator per family — but confirm it with `diff_runs.py` on
+the next run rather than trusting it: the expected diff is the four new columns added and
+**zero changed columns**.
 
 ### Numbers a rerun must reproduce
 
@@ -197,56 +277,51 @@ drops the other silently, and the symptom is a shorter session list rather than 
 
 ## Open work
 
-Ordered by what the next fresh run should capture, since those are the items that
-otherwise force a second 7-hour run.
+### 1. Three provenance defects from the 2026-09-01 run — fix before the next run
 
-### 1. Capture the windowed-grating window geometry
+Every metric in this asset is fine. All three of these are *around* the numbers, and all
+three are the same failure class as last time: **a check that runs in a different shape
+than production.**
 
-`ssi_*` compares a windowed grating response against a full-field one, but **nothing in
-the asset records where the window was or how big it was**. So the index cannot be
-separated from a targeting miss: a cell whose receptive field falls outside the window
-reads as "suppressed" when it was simply not stimulated.
+**(a) The Dockerfile `ENV` line is malformed, and the bad value shipped.**
 
-- `preflight.py`, `_stimulus_coverage`: collect `center_azimuth` / `center_elevation`
-  beside `direction` / `spatial_frequency`. Two lines, and it answers the per-column
-  question for all 25 sessions permanently. **Nothing we built reads those columns
-  today**, which is why this is still unknown.
-- `stimulus_metrics.surround_suppression_metrics`: carry the centre out as
-  `dgw_center_azimuth` / `dgw_center_elevation` (per-session constants).
-
-Known so far: one fixed window position per session (24 conditions = 12 directions x 2
-SFs, no location factor). In **column 1, volumes 3 and 5** it is azimuth -8.9 deg,
-elevation -12.4 deg; full-field rows carry a `(0.0, 0.0)` placeholder, which is how you
-tell them apart. **Only those 2 of 25 sessions were ever checked**, and both are column 1
-— so they test volume-to-volume stability and nothing else. Acquisition notes say the
-position was tuned per session. **Diameter is absent from the stimulus table entirely**
-and must come from acquisition-side metadata.
-
-### 2. Retain the per-cell 2D receptive-field map
-
-The full per-ROI subfield map is already built in `receptive_field_metrics` and thrown
-away on return:
-
-```python
-rf = frac.reshape(plane.n_rois, 2, n_rows, n_cols)   # dim 1: 0 = ON, 1 = OFF
+```dockerfile
+ENV SWDB_CODE_VERSION = 17cacea5a61c6b596324d6911a879b15f3ed98c4
 ```
 
-Each pixel is the fraction of that pixel's presentations producing a response above that
-ROI's own bootstrapped spontaneous 95th percentile. Exporting it is **a retention change,
-not an analysis step — no extra computation**, and the shipped centres already derive
-from this array.
+Docker's legacy `ENV <key> <value>` form takes *everything after the first space* as the
+value, so the variable is set to `"= 17cacea..."` — with the equals sign and space
+included. `processing.json` in the shipped asset records exactly that:
 
-- Export from **before** `frac[frac < rf_frac_thresh] = 0.0` (threshold 0.25). The
-  post-threshold version is recoverable from the continuous one in a line; the reverse is
-  not, and the continuous version is what a familiar RF figure looks like.
-- It does not fit the per-ROI CSV schema: 2 x 8 x 14 = 224 floats per ROI, ~35 MB as
-  float32 over 39,407 ROIs. Wants an `.npz` holding `(n_rois, 2, 8, 14)` plus a `roi_key`
-  index.
-- Three things must travel with it or it is uninterpretable: `altitudes`/`azimuths` from
-  the `lsn` dict; the **seed**, since per-pixel significance is bootstrapped; and the fact
-  that `frac[~plane.is_valid] = 0.0` means **a blank map is "excluded", not "no RF"**.
+```json
+"version": "= 17cacea5a61c6b596324d6911a879b15f3ed98c4"
+```
 
-### 3. Tune the response windows
+Fix is to drop the spaces: `ENV SWDB_CODE_VERSION=17cacea5a61c6b596324d6911a879b15f3ed98c4`.
+The entry point's guard rejects *empty* and *whitespace* values but not a malformed one,
+so it passed. Worth adding a shape check — 40 hex characters, or 7-40 — since the whole
+point of the variable is that the recorded value be usable.
+
+Also note the SHA is **hardcoded in the Dockerfile**, so it must be bumped by hand every
+time the code changes or the asset will claim it was built from a stale commit. It was
+correct for this run only because the commit after it touched nothing but the Dockerfile.
+
+**(b) `stimulus_metrics_provenance.json` ships `git_sha: null`** while `processing.json`
+in the same directory carries the version. `utils/provenance.git_sha()` shells out to git
+and never consults `SWDB_CODE_VERSION`, so in a capsule (no `.git`) it always returns
+None. Two sidecars in one asset disagreeing about the same fact is worse than either
+answer alone. Give `git_sha()` the same env-var-first ladder `metadata.py` already has.
+
+**(c) `test_entrypoint.py` fails 2 of 14 checks in the capsule** — `resolves from git
+here` and `looks like a full sha`. I wrote those, and they assert that the *git fallback*
+works, which it cannot in an environment with no `.git` — which is the exact environment
+the variable exists to serve. The consequence is not cosmetic: the validation notebook
+printed **"unit tests failed -- fix these before reading anything below"** over an
+otherwise-clean asset, which is precisely the defect (a skipped-or-inapplicable check
+reported as failure) that the previous run's `SkipTest` fix was meant to end. Make both
+checks skip when `git rev-parse` finds no repository.
+
+### 2. Tune the response windows
 
 The windows reproduce a pipeline built for slow calcium transients; this one runs on
 deconvolved events, which are far sparser. Matching first was the only way to make the
@@ -259,25 +334,29 @@ two windows differing by less than a sample interval are often identical; two th
 straddle a sample boundary differ a lot. Tune in units of `dt`, and use a scale-invariant
 metric (like `lifetime_sparseness`) to detect a varying sample count.
 
-### 4. Efficiency — two unimplemented wins, ~2x
+### 3. Efficiency — one win left
 
-Drifting gratings is 96 % of runtime, and inside it the cost is `vonmises_two_peak_fit`
-(~1,220 fits per plane at ~134 ms).
+**Speedup 1 is done** (2026-09-01): `drifting_gratings_metrics` takes a `fit_sf_index`,
+windowed self-selects, and the notebook computes windowed first so full-field can be
+passed `dgw.pref_cond_index[:, 1]`. Output is unchanged; the run went 7.2 h -> 4.83 h.
 
-- **Fit only the SF that gets read (~2x, output identical).** `tuning_params` has exactly
-  one consumer, `surround_suppression_metrics`, which reads one SF per ROI per grating
-  type — so with `n_sf = 2`, **half of every fit is discarded**. Windowed can self-select
-  (`pref_cond_index` is computed before the fit block); full-field needs a new
-  `fit_sf_index` argument fed from `dgw.pref_cond_index[:, 1]`. Verify bit-for-bit.
-- **A data-derived `p0` (maybe 2-3x, but changes numbers).** The fixed
-  `p0=(0.1, 1, 180, 0.01, 1, 0.001)` starts `scale_1` one to two orders of magnitude
-  above event amplitudes. This can move `ssi_tuning_fit` into a different local minimum,
-  so it needs revalidation, not a diff. **Do the first one first, and separately.**
+Remaining: **a data-derived `p0` (maybe 2-3x, but changes numbers).** The fixed
+`p0=(0.1, 1, 180, 0.01, 1, 0.001)` starts `scale_1` one to two orders of magnitude above
+event amplitudes. This can move `ssi_tuning_fit` into a different local minimum, so it
+needs revalidation against the reference tables, not a bit-for-bit diff.
 
-### 5. Smaller
+A caveat now visible: speedup 1 predicted ~3.6 h and delivered 4.83 h. The single-plane
+profile that said drifting gratings was 96 % of runtime over-weighted the fit relative to
+a full 25-session run. **Re-profile before promising a multiplier for speedup 2.**
+
+### 4. Smaller
 
 - `ssi_tuning_fit` has **no seed-to-seed noise floor** — `fit_tuning_curves` is skipped on
   seed B, so the most fit-dependent metric is the only one with no control.
+- **Re-run the fidelity comparison.** The 2026-09-01 run attached no reference tables and
+  recomputed no seed B, so the corrections and agreement statistics have not been checked
+  against published data since the M1-M7 work. Attach `data_frames` and set
+  `VALIDATION_SESSIONS` on the next run.
 - The `_ssa` vs `_ssa_v2` gotcha is currently absent from every notebook.
 - The access notebook's asset resolver could take a repo-relative fallback so it runs
   outside the capsule.
@@ -305,6 +384,98 @@ These are shipped on purpose. Do not "fix" them unprompted.
   columns for no measured benefit.
 
 ---
+
+## An independent derivation exists — where it agrees, and where it diverges
+
+`workshop2 - extended version.ipynb` (a teaching notebook on verifying LLM-generated code,
+not a production pipeline) computes orientation tuning, OSI/gOSI and tuning width from the
+same `409828_V1DD_Filtered` sessions, derived independently of this work. It covers
+`drifting_gratings_full` only. Compared 2026-09-01.
+
+**It independently confirms two things.** It found `is_soma == False` for **1,038 ROIs, all
+in one session**, and concluded they should be filtered — exactly our 1,038
+`pika_roi_confidence <= 0.5` in column 4 / volume 1. Two derivations reaching the same
+number is the strongest evidence we have that those two criteria agree row-for-row. It also
+joins coregistration on `(column, volume, plane, roi)` and calls `.drop_duplicates()`,
+independently hitting the duplicate-row inflation documented here.
+
+**The root divergence is trace type, and everything else follows from it.** They use `dff`
+with a 0.5 s pre-stimulus baseline subtracted; we use `events` with no baseline. So:
+
+- Their response window is placed at the trial-averaged PSTH peak to absorb the ~0.5-1 s
+  indicator lag. Ours is a fixed 2.0 s from onset, which is only defensible **because
+  deconvolution already removed that lag**.
+- Their responses are signed, so their OSI can leave [0, 1] — they hit this and moved to a
+  rectified gOSI. Ours does not rectify, which is safe only because events are
+  non-negative. That invariant is now commented at the `gosi` computation in
+  `stimulus_metrics.py`.
+- They collapse direction to orientation (`% 180`) and average over TF **and SF**; we keep
+  12 directions x 2 SFs and report metrics at the preferred SF. Their OSI is therefore a
+  relative of ours, not the same number, and they cannot report `dsi` at all.
+
+**They have one thing we do not: a tuning width.** Their von Mises fit is 5-parameter with
+a shared kappa bounded at 50, which yields FWHH in degrees — and a real artifact they
+caught, a floor at **19.1 deg** where the bound binds. Ours is 6-parameter with two
+independent kappas and no bounds, so it has no such floor but is unstable enough to need
+the 2,000 -> 10,000 evaluation retry. We already run this fit for `ssi_tuning_fit`, so FWHH
+would be cheap to add; it is a schema change, so it has not been.
+
+**Their verification technique worth stealing:** inspecting the argmin/argmax rows of each
+metric on real data and hand-checking the arithmetic. That is how they found their defect,
+and our aggregate-statistical validation would not have surfaced it.
+
+## The 2019 white paper, and where we disagree with it
+
+`V1DD_WhitePaper_v6.pdf` (Abbasi-Asl et al., Aug 2019) describes this dataset; our mouse is
+its `Slc2`. Compared against the shipped asset 2026-09-01.
+
+**The headline divergence is trace type, and it is the inverse of ours.** The paper says
+"except the receptive field mapping, all the other analysis is performed using the **df/f**
+traces. For the receptive field mapping, **events** ... are used." Our config is exactly
+opposite: events for the gratings and natural stimuli, dF/F for locally sparse noise.
+
+Our inversion is not a mistake on our side. The port reproduces the published
+`data_frames/*_M409828.csv` tables to ~1e-9 on every deterministic metric, so those tables
+were themselves built from events — meaning `allen_v1dd` had departed from the paper before
+we touched it. **We are bug-compatible with the code, not with the paper.**
+
+What reproduces, computed from the shipped CSVs:
+
+| paper | paper value | ours |
+|---|---|---|
+| responsive to full-field gratings | 26 % | 28.3 % |
+| responsive to windowed gratings | 30 % | 27.4 % (**ordering reversed**) |
+| OSI full vs. windowed corr., responsive, col 1 | 0.54 | **0.555** |
+| same, all unique cells | 0.27 | 0.321 |
+| LSN responsiveness peak | >40 % at 306 um | 41.2 % at 274 um |
+| RF centres outside the window, col 1 | "over half" | 67.1 % |
+| full-field ∩ windowed responsive | ~15 % | 12.1 % |
+
+The OSI correlation is the sharpest of these: the paper defines OSI as `|sum R e^2i0|/|sum R|`,
+which is our `gosi` (0.555 vs their 0.54), not our `osi` (0.451). The metric whose
+definition matches is the metric that agrees.
+
+**Where the paper is stale or wrong:**
+
+- Table 1 lists Slc2's Col.1/Vol.5 and Col.2/Vol.1 as having failed pre-processing. **Both
+  are in our asset with full data** (965 and 914 ROIs) — recovered by reprocessing since.
+- The natural-movie repeat count **contradicts itself**: 8 times on page 4, 10 times on
+  page 21. Our M1 measured 9. Neither stated value is right.
+- The gDSI formula is a typo — `(Rpref - Rnull)/(Rpref - Rnull)`, identically 1.
+- **Cell counts differ ~3x**: 12,836 valid / 9,365 unique for Slc2 versus our 39,407 /
+  30,864, with low confidence accounting for only 1,038. A segmentation-generation
+  difference, and it means our population fractions are not strictly comparable to the
+  paper's even where the percentages agree.
+
+**Useful things only the paper records:** the 30-degree window diameter; gratings at 1 Hz
+TF and 80 % contrast, 2 s on + 1 s grey with blank sweeps intermingled; LSN spots 9 degrees
+at ~3 Hz; and the 118-image set shown as **two seeded orders, four presentations each** —
+which is the origin of the `_ssa` / `_ssa_v2` distinction documented nowhere else.
+
+**Metrics the paper has that we do not:** response reliability (mean pairwise between-trial
+correlation, its Figure 18 and its natural-movie responsiveness criterion), population
+sparseness, running modulation index, and event SNR. The first three are all computable from
+arrays our metric functions already build and discard.
 
 ## Methodology worth reusing
 

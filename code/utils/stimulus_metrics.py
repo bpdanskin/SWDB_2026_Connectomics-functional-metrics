@@ -50,8 +50,10 @@ __all__ = [
     "receptive_field_metrics",
     "drifting_gratings_metrics",
     "surround_suppression_metrics",
+    "window_containment",
     "DGResult",
     "SSI_COLUMNS",
+    "CONTAINMENT_COLUMNS",
     "vonmises_two_peak",
     "vonmises_two_peak_fit",
     "vonmises_pref_dir",
@@ -138,6 +140,12 @@ class MetricConfig:
     # --- surround suppression
     running_threshold_cm_s: float = 1.0
     running_pad_seconds: float = 0.10
+    #: Radius of the windowed-grating aperture, degrees. **Not recorded anywhere in the
+    #: NWB** — there is no size column in the stimulus table. It comes from the V1DD
+    #: white paper (Abbasi-Asl et al. 2019), which states a 30 degree diameter twice.
+    #: Used only by `window_containment`; no metric that reproduces the historical
+    #: tables depends on it.
+    dgw_window_radius_deg: float = 15.0
     ssi_min_trials: int = 3
 
     # --- expensive extras, absent from every published table
@@ -202,7 +210,9 @@ OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
         "ssi", "ssi_avg", "ssi_avg_at_pref_sf", "ssi_running",
         "ssi_running_avg_at_pref_sf", "ssi_stationary",
         "ssi_stationary_avg_at_pref_sf", "ssi_tuning_fit",
-        "dgw_center_azimuth", "dgw_center_elevation"],
+        "dgw_center_azimuth", "dgw_center_elevation",
+        "dgw_rf_distance_on", "dgw_rf_distance_off",
+        "dgw_rf_overlap_on", "dgw_rf_overlap_off"],
     "rf_metrics": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "pika_roi_confidence",
@@ -653,7 +663,16 @@ def drifting_gratings_metrics(
     dsi = _ratio(pref - null_r, pref + null_r)
 
     theta = np.deg2rad(dir_list.astype(float))
-    # gosi normalises with a NaN-PROPAGATING sum, matching `_compute_osi`
+    # gosi normalises with a NaN-PROPAGATING sum, matching `_compute_osi`.
+    #
+    # Neither this nor `osi` above rectifies the tuning curve, and that is only safe
+    # because `trace_type` for both grating families is `events` -- deconvolved, so
+    # non-negative, so `L_norm` cannot be a small or negative number built by
+    # cancellation. On a *signed* trace (baseline-subtracted dF/F) the same lines are
+    # wrong: a negative response at the orthogonal direction drives `osi` outside
+    # [0, 1], and a near-zero signed `L_norm` makes `gosi` explode. Implementations
+    # working from dF/F clip to zero first (`np.clip(R, 0, None)`) for exactly this
+    # reason. If `config.trace_type` is ever pointed at `dff` here, rectify first.
     L_norm = tuning.sum(axis=1)
     L_ori = tuning @ np.exp(2j * theta)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -750,6 +769,7 @@ def surround_suppression_metrics(
     *,
     config: MetricConfig = DEFAULT_CONFIG,
     mouse: Optional[str] = None,
+    containment: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Eight surround-suppression indices, all of the form (W - F) / (W + F).
 
@@ -762,6 +782,13 @@ def surround_suppression_metrics(
     both sides, so a trial at exactly 1.0 belongs to neither. `ssi_running` and
     `ssi_stationary` additionally require at least three qualifying trials in *both*
     stimuli; the `*_avg_at_pref_sf` variants have no such minimum.
+
+    `containment` is the frame from `window_containment`, spliced in so the schema stays
+    owned here. It is passed in rather than computed here on purpose: it is a function of
+    the receptive-field map and the aperture position, and has nothing to do with the SSI
+    arithmetic. Computing it inside would make this family depend on locally sparse noise,
+    so a session missing that stimulus would take surround suppression down with it.
+    Omit it and the columns are NaN, which is what an absent LSN family should produce.
     """
     n_rois = plane.n_rois
     out = {m: np.full(n_rois, np.nan) for m in SSI_COLUMNS}
@@ -813,6 +840,14 @@ def surround_suppression_metrics(
     az, el = dgw.center
     frame["dgw_center_azimuth"] = np.full(n_rois, az)
     frame["dgw_center_elevation"] = np.full(n_rois, el)
+    for c in CONTAINMENT_COLUMNS:
+        if containment is None:
+            frame[c] = np.full(n_rois, np.nan)
+        else:
+            if len(containment) != n_rois:
+                raise ValueError(
+                    f"containment has {len(containment)} rows, plane has {n_rois} ROIs")
+            frame[c] = np.asarray(containment[c], dtype=np.float64)
     return frame
 
 
@@ -1049,3 +1084,107 @@ def receptive_field_metrics(
     out["azimuth_rf_off"] = np.where(has_off, azi[:, 1], np.nan)
     out["altitude_rf_off"] = np.where(has_off, alt[:, 1], np.nan)
     return out, rf_map
+
+
+# ------------------------------------------------- receptive field vs. grating window
+
+
+CONTAINMENT_COLUMNS = ["dgw_rf_distance_on", "dgw_rf_distance_off",
+                       "dgw_rf_overlap_on", "dgw_rf_overlap_off"]
+
+
+def _window_coverage(azimuths, altitudes, center, radius: float, sub: int = 8):
+    """Fraction of each stimulus pixel's **area** inside the aperture disc.
+
+    Depends only on the window position, so one array serves every ROI in a session.
+
+    A pixel-centre-inside-the-disc test is not good enough here and the numbers say why:
+    the pixels are 9.3 degrees, the aperture is 30, so the disc spans about 3.2 pixels
+    while covering roughly 8 pixels' worth of area. Whether a centre test counts 5 pixels
+    or 9 then depends on how the disc happens to land on the grid — a swing of about
+    40 %. Sub-sampling each pixel on a `sub` x `sub` grid removes that: at sub=8 the
+    recovered area is within ~1 % of pi*r^2, which the unit tests assert.
+    """
+    az = np.asarray(azimuths, dtype=np.float64)
+    alt = np.asarray(altitudes, dtype=np.float64)
+    caz, cel = float(center[0]), float(center[1])
+    if not (np.isfinite(caz) and np.isfinite(cel)):
+        return None
+
+    # pitch is read off the grid, never assumed: this asset is 9.3 degrees, but a
+    # different locally-sparse-noise template would silently produce wrong areas.
+    def pitch(v, name):
+        d = np.diff(v)
+        if len(d) and not np.allclose(d, d[0]):
+            raise ValueError(f"{name} are not evenly spaced: {np.unique(np.round(d, 6))}")
+        return float(abs(d[0])) if len(d) else 0.0
+
+    p_az, p_alt = pitch(az, "azimuths"), pitch(alt, "altitudes")
+    offs = (np.arange(sub) + 0.5) / sub - 0.5                    # sub-cell centres
+    d_az = (az[:, None] + offs[None, :] * p_az) - caz            # (n_cols, sub)
+    d_alt = (alt[:, None] + offs[None, :] * p_alt) - cel         # (n_rows, sub)
+    inside = ((d_alt ** 2)[:, :, None, None] + (d_az ** 2)[None, None, :, :]
+              <= radius * radius)                                # (rows, sub, cols, sub)
+    return inside.mean(axis=(1, 3))                              # (n_rows, n_cols)
+
+
+def window_containment(
+    rf_frame: pd.DataFrame,
+    rf_map: np.ndarray,
+    lsn: Mapping[str, Any],
+    center: Sequence[float],
+    *,
+    config: MetricConfig = DEFAULT_CONFIG,
+) -> pd.DataFrame:
+    """How much of each ROI's receptive field the windowed grating actually covered.
+
+    `ssi` compares a windowed grating response against a full-field one, which only means
+    "surround suppression" if the window covered the cell's receptive field. A cell whose
+    RF sat outside the aperture was barely stimulated, and its weak windowed response
+    reads as suppression when it was a targeting miss.
+
+    Two measures, deliberately, because they disagree about which cells to keep:
+
+    * **`dgw_rf_distance_*`** — degrees from the RF centre to the window centre. The
+      conservative reading, and the one the white paper used. It is also blunt: the
+      centre is an unweighted centroid on a 9.3-degree grid, so one marginal pixel moves
+      it ~4.6 degrees.
+    * **`dgw_rf_overlap_*`** — the fraction of the RF's mass falling inside the aperture,
+      in [0, 1]. More permissive and better behaved: it keeps cells whose field overlaps
+      the window even though the centroid does not, which on this asset is 1,572 cells
+      against 970 at a 0.05 cut.
+
+    The overlap is weighted by the **post-threshold** map. The continuous pre-threshold
+    map is dominated by noise floor — its mean overlap is 0.086 against the 0.073 a
+    uniform random map would give, i.e. it mostly measures the window's share of the
+    screen rather than anything about the cell.
+
+    **Neither is a filter.** On this asset overlap correlates with `ssi` at r = +0.07
+    (n = 6,827) with a non-monotonic profile, so the targeting concern is directionally
+    supported but weak. These columns are reported so a consumer can judge; gating on
+    them would discard most of the data on thin evidence.
+
+    Returns a frame of `CONTAINMENT_COLUMNS`, all NaN where the window position is
+    unknown (two sessions in this asset record none) or the ROI has no field.
+    """
+    n_rois = len(rf_frame)
+    out = {c: np.full(n_rois, np.nan) for c in CONTAINMENT_COLUMNS}
+    cov = _window_coverage(lsn["azimuths"], lsn["altitudes"], center,
+                           config.dgw_window_radius_deg)
+    if cov is None:                       # no recorded aperture -> everything stays NaN
+        return pd.DataFrame(out, index=rf_frame.index)
+
+    caz, cel = float(center[0]), float(center[1])
+    rf_map = np.asarray(rf_map)
+    for i, sub in enumerate(("on", "off")):
+        out[f"dgw_rf_distance_{sub}"] = np.hypot(
+            rf_frame[f"azimuth_rf_{sub}"].to_numpy(dtype=np.float64) - caz,
+            rf_frame[f"altitude_rf_{sub}"].to_numpy(dtype=np.float64) - cel)
+        w = np.asarray(rf_map[:, i, :, :], dtype=np.float64).copy()
+        w[w < config.rf_frac_thresh] = 0.0
+        den = w.sum(axis=(1, 2))
+        num = (w * cov[None, :, :]).sum(axis=(1, 2))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out[f"dgw_rf_overlap_{sub}"] = np.where(den > 0, num / np.where(den > 0, den, 1.0),
+                                                    np.nan)
+    return pd.DataFrame(out, index=rf_frame.index)

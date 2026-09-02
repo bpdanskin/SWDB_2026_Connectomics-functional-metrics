@@ -195,4 +195,97 @@ check("column order matches published",
 check("has_rf_* written as bool", all(pub[c].dtype == bool for c in
                                       ("has_rf_on", "has_rf_off", "has_rf_on_or_off")))
 
+print("\n[7] window containment: RF vs the grating aperture")
+# Geometry only -- no traces, no bootstrap. Every expected value below is analytic.
+RADIUS = 15.0
+cfg_c = sm.MetricConfig(dgw_window_radius_deg=RADIUS)
+alt_c = (np.arange(ROWS) - (ROWS - 1) / 2) * GRID
+azi_c = (np.arange(COLS) - (COLS - 1) / 2) * GRID
+lsn_c = {"altitudes": alt_c, "azimuths": azi_c}
+
+# A disc well inside the screen must recover pi*r^2 to sub-percent accuracy. This is
+# what makes the supersampling worth its cost: a pixel-centre test lands ~40% off.
+cov = sm._window_coverage(azi_c, alt_c, (0.0, 0.0), RADIUS)
+area = cov.sum() * GRID * GRID
+check("coverage recovers the disc area to <1%",
+      abs(area - np.pi * RADIUS ** 2) / (np.pi * RADIUS ** 2) < 0.01,
+      f"{area:.1f} vs {np.pi * RADIUS ** 2:.1f} deg^2")
+check("coverage is a fraction everywhere", bool(((cov >= 0) & (cov <= 1)).all()))
+check("the centre pixel is fully covered (9.3 deg pixel inside a 15 deg disc)",
+      cov[ROWS // 2, COLS // 2] == 1.0)
+check("a far corner pixel is untouched", cov[0, 0] == 0.0)
+
+def containment(rf_map, centres, center=(0.0, 0.0)):
+    frame = pd.DataFrame({
+        "azimuth_rf_on": [centres[0]], "altitude_rf_on": [centres[1]],
+        "azimuth_rf_off": [np.nan], "altitude_rf_off": [np.nan]})
+    return sm.window_containment(frame, rf_map, lsn_c, center, config=cfg_c)
+
+# One bright pixel next to the disc centre -> entirely inside. Note the grid has an even
+# number of rows and columns, so no pixel sits ON the centre: the nearest is half a pitch
+# away in each axis, which is why the expected distance below is not zero.
+m = np.zeros((1, 2, ROWS, COLS), dtype=np.float32)
+m[0, 0, ROWS // 2, COLS // 2] = 1.0
+near = (azi_c[COLS // 2], alt_c[ROWS // 2])
+check("the nearest pixel to the centre is half a pitch off in each axis",
+      abs(near[0] - GRID / 2) < 1e-12 and abs(near[1] - GRID / 2) < 1e-12, str(near))
+c = containment(m, near)
+check("overlap = 1.0 for the pixel nearest the aperture centre",
+      abs(float(c["dgw_rf_overlap_on"][0]) - 1.0) < 1e-12)
+check("distance is the analytic hypot(pitch/2, pitch/2)",
+      abs(float(c["dgw_rf_distance_on"][0]) - np.hypot(GRID / 2, GRID / 2)) < 1e-12,
+      f"{float(c['dgw_rf_distance_on'][0]):.4f} vs {np.hypot(GRID / 2, GRID / 2):.4f}")
+# and distance really is zero when the aperture is centred on the field
+c = containment(m, near, center=near)
+check("distance = 0 when the aperture sits on the RF centre",
+      abs(float(c["dgw_rf_distance_on"][0])) < 1e-12)
+
+# one bright pixel in the far corner -> entirely outside
+m = np.zeros((1, 2, ROWS, COLS), dtype=np.float32)
+m[0, 0, 0, 0] = 1.0
+c = containment(m, (azi_c[0], alt_c[0]))
+check("overlap = 0.0 for a distant pixel", float(c["dgw_rf_overlap_on"][0]) == 0.0)
+
+# a uniform map is the sharpest check: overlap must equal disc area / screen area,
+# independent of any per-pixel detail.
+m = np.ones((1, 2, ROWS, COLS), dtype=np.float32)
+expect = (np.pi * RADIUS ** 2) / ((ROWS * GRID) * (COLS * GRID))
+c = containment(m, (0.0, 0.0))
+check("uniform map -> overlap = disc/screen",
+      abs(float(c["dgw_rf_overlap_on"][0]) - expect) < 0.01 * expect,
+      f"{float(c['dgw_rf_overlap_on'][0]):.4f} vs {expect:.4f}")
+
+# sub-threshold pixels must not contribute: the overlap is weighted by the POST-threshold
+# map, because the continuous one is dominated by noise floor.
+m = np.zeros((1, 2, ROWS, COLS), dtype=np.float32)
+m[0, 0, ROWS // 2, COLS // 2] = 1.0
+m[0, 0, 0, 0] = float(cfg_c.rf_frac_thresh) - 0.01     # outside the disc, below threshold
+c = containment(m, (azi_c[COLS // 2], alt_c[ROWS // 2]))
+check("a sub-threshold pixel outside the disc does not dilute the overlap",
+      abs(float(c["dgw_rf_overlap_on"][0]) - 1.0) < 1e-12,
+      "post-threshold weighting")
+m[0, 0, 0, 0] = float(cfg_c.rf_frac_thresh) + 0.01     # same pixel, now above threshold
+c = containment(m, (azi_c[COLS // 2], alt_c[ROWS // 2]))
+check("the same pixel above threshold does dilute it",
+      float(c["dgw_rf_overlap_on"][0]) < 1.0)
+
+# an ROI with no field, and a session with no recorded aperture, both give NaN
+m = np.zeros((1, 2, ROWS, COLS), dtype=np.float32)
+c = containment(m, (np.nan, np.nan))
+check("no suprathreshold pixels -> overlap NaN", np.isnan(float(c["dgw_rf_overlap_on"][0])))
+c = containment(np.ones((1, 2, ROWS, COLS), dtype=np.float32), (0.0, 0.0),
+                center=(np.nan, np.nan))
+check("unknown aperture -> all containment columns NaN",
+      bool(c[sm.CONTAINMENT_COLUMNS].isna().all().all()))
+
+# a non-uniform grid would silently produce wrong areas, so it must raise
+try:
+    sm._window_coverage(np.array([0.0, 9.3, 30.0]), alt_c, (0.0, 0.0), RADIUS)
+    check("raises on an unevenly spaced stimulus grid", False)
+except ValueError as e:
+    check("raises on an unevenly spaced stimulus grid", "evenly spaced" in str(e))
+
+check("containment columns are in OUTPUT_COLUMNS, after the aperture centre",
+      sm.OUTPUT_COLUMNS["surround_supression_index"][-4:] == sm.CONTAINMENT_COLUMNS)
+
 summary()

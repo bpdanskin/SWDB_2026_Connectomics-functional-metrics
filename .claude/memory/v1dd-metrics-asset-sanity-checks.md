@@ -1,6 +1,6 @@
 ---
 name: v1dd-metrics-asset-sanity-checks
-description: "What to verify when the full 7 h stimulus-metrics run returns — expected numbers, the diff that should appear, and the three provenance defects the first reproducible run exposed."
+description: "What to verify when a full stimulus-metrics run returns — expected numbers, the diff that should appear, and the provenance defects each reproducible run has exposed (three in 2026-08-16, three more in 2026-09-01)."
 metadata: 
   node_type: memory
   type: project
@@ -102,6 +102,46 @@ shape than production**.
    lenient — writing `null` and warning is right for a library, wrong for a published
    asset. The CO capsule id is linked to the data asset, so nothing else CO injects needs
    capturing.
+
+## The 2026-09-01 run
+
+Second reproducible run, asset `409828_V1DD_stimulus_metrics_2026-09-01_07-37-53`, built
+from `17cacea`. **Every metric is fine; three new provenance defects, all the same class
+as last time — a check running in a different shape than production.**
+
+Shape confirmed: 25 sessions / 150 planes / **39,407 ROIs**, `complete_asset` true,
+`failed_sessions` empty, `differs_from_reference_config` exactly 3, integrity **57/57**,
+low-confidence session still 1,038 invalid (its 512 non-null SSI rows are 1,550 - 1,038).
+Runtime **4.83 h** (17,400.6 s), down from 7.2 h after speedup 1. New in the asset:
+`rf_maps_M409828.npz` and `dgw_center_*`. `format` is now populated per session.
+
+**What did not run:** `VALIDATION_SESSIONS` was empty and `data_frames` was not attached,
+so there was **no fidelity comparison and no seed-to-seed floor**. Every agreement number
+on record still comes from the M1-M7 work. Attach the reference and set
+`VALIDATION_SESSIONS` next time.
+
+### The three new defects
+
+1. **`ENV SWDB_CODE_VERSION = <sha>` in the Dockerfile is malformed.** Docker's legacy
+   `ENV <key> <value>` form takes everything after the first space as the value, so the
+   variable became `"= 17cacea..."` and `processing.json` shipped that verbatim. Write it
+   as `ENV SWDB_CODE_VERSION=<sha>`, no spaces. The entry-point guard rejects empty and
+   whitespace values but not malformed ones — **add a shape check (hex, 7-40 chars)**,
+   since a version you cannot resolve is the thing the variable exists to prevent. The
+   SHA is also hardcoded, so it needs bumping by hand on every code change.
+2. **`stimulus_metrics_provenance.json` ships `git_sha: null`** while `processing.json`
+   beside it carries the version. `utils/provenance.git_sha()` shells out to git and never
+   reads `SWDB_CODE_VERSION`; `metadata.py` does. Give both the same ladder — two sidecars
+   in one asset disagreeing is worse than either answer alone.
+3. **`test_entrypoint.py` fails 2 of 14 checks in the capsule** (`resolves from git here`,
+   `looks like a full sha`). Those assert the git *fallback* works, in the one environment
+   that has no `.git` — the environment the variable exists for. The validation notebook
+   therefore printed "unit tests failed -- fix these before reading anything below" over a
+   clean asset. **This is the same failure mode as the `SkipTest` defect of 2026-08-16,
+   recurring in a test written to fix that class of problem.** Skip both when
+   `git rev-parse` finds no repository.
+
+Suite now reports **15 passed, 1 skipped, 1 failed, 451 checks**.
 
 ## What no automated check covers
 

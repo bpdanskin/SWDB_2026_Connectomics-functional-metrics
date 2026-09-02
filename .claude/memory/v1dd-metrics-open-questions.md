@@ -57,7 +57,7 @@ What was established 2026-08-24, from `checks/schema_report.json`:
 * In **column 1, volumes 3 and 5** (different acquisition days) it is
   **azimuth −8.9°, elevation −12.4°**. Full-field rows carry a `(0.0, 0.0)` placeholder,
   which is how you tell the two apart in `center_azimuth`.
-* **Only those two of 25 sessions were ever checked.** Acquisition notes say the position
+* (Superseded 2026-09-01 by the shipped table below — at the time only those two of 25 sessions had been checked.) **Only those two of 25 sessions were ever checked.** Acquisition notes say the position
   was tuned per session, so it plausibly varies by column — the two that agree are both
   column 1, so they test volume-to-volume stability and nothing else.
 * **Diameter is absent from the NWB stimulus table entirely** — there is no size column.
@@ -71,6 +71,63 @@ What was established 2026-08-24, from `checks/schema_report.json`:
    per-ROI (session constants); `OUTPUT_COLUMNS["surround_supression_index"]` updated.
 3. `DGResult` has a new `center: Tuple[float, float]` field; `drifting_gratings_metrics`
    extracts it from the non-blank windowed trials.
+
+### Answered 2026-09-01: the window is fixed per COLUMN
+
+Read straight off `surround_supression_index_M409828.csv` in the
+`409828_V1DD_stimulus_metrics_2026-09-01_07-37-53` asset, all 25 sessions. The position is
+constant across a column's five volumes:
+
+| column | azimuth | elevation |
+|---|---|---|
+| 1 | -8.9 | -12.4 |
+| 2 | -19.6 (volume 2: **-19.8**) | -10.0 |
+| 3 | +1.8 | -9.7 |
+| 4 | -15.4 | -16.4 |
+| 5 | +9.9 | -14.4 |
+
+Two caveats that matter for any containment analysis:
+
+* **Column 2 / volume 2 sits 0.2 deg off its column.** Retargeting jitter rather than a
+  different window, but do not test for exact equality within a column.
+* **Two sessions have no centre at all** — column 2 / volume 5 (906 ROIs) and column 4 /
+  volume 1 (1,550 ROIs), both blank. Both have complete SSI and DGW values
+  (`preferred_dir` non-null for every valid ROI), so the stimulus ran and only the
+  recorded position is missing. **2,456 ROIs cannot be filtered for RF containment.**
+  Column 4 / volume 1 is also the 67 %-low-confidence session; the two problems look
+  unrelated, and its 512 non-null SSI rows are exactly its 1,550 minus 1,038 invalid, so
+  the low-confidence story is unchanged.
+
+### Answered 2026-09-01 from the white paper: the diameter is 30 degrees
+
+`V1DD_WhitePaper_v6.pdf` (Abbasi-Asl et al., Aug 2019) states it twice: "the stimulus was
+restricted to a **30 degree diameter window**" and "The radius of window is 15 degrees."
+It also gives the reason for the per-column position -- "For each column, the position of
+the window was determined separately to align with the population receptive fields of
+imaged neurons" -- which is exactly the pattern measured off the shipped SSI table.
+
+**So containment is computable, and it was computed. The result is a negative one.**
+
+* Of ROIs that are windowed-responsive, have an ON receptive field, and have a recorded
+  window: **2,387 of 39,407 (6.1 %)**. Of those, only **970 (40.6 %)** have their RF centre
+  within 15 degrees. So the cleanly interpretable SSI population is **2.5 % of the asset**.
+  In column 1 alone, **67.1 %** of RF-on cells sit outside the window -- the white paper
+  found the same ("over half") and listed surround suppression under "ongoing analysis".
+* **But `ssi` does not track that distance at all**: Pearson r = -0.03, and binned means are
+  flat (~0.48-0.53) from 0 to beyond 37 degrees. Not a selection effect -- dropping the
+  responsiveness filter gives r = -0.02 over 6,827 ROIs. A targeting miss would push
+  `ssi = (W-F)/(W+F)` *negative*, and no such trend exists at any distance.
+
+**The most likely reason the test is blunt, and what to do instead.** RF pixels are 9.3
+degrees, so a 30-degree window is about three pixels across and a centre two pixels off can
+still have most of its field inside. Centre distance is the wrong measurement; **overlap
+between the RF map and the window disc is the right one**, and `rf_maps_M409828.npz` now
+ships the per-cell maps needed for it. Secondary: our centre is an unweighted centroid, so
+one marginal pixel moves it ~4.6 degrees, attenuating any real relationship.
+
+Practical guidance until that is done: `rf_inside_window_on` is a **conservative** filter --
+cells passing it are well targeted -- but cells failing it should not be discarded, because
+the distance test is not sensitive enough to justify it.
 
 Diameter (size of the aperture) is still absent — it has to come from acquisition-side
 metadata and is not in the NWB stimulus table. The per-session centre is now in the asset;

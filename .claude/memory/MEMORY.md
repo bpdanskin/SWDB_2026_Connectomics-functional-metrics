@@ -1,6 +1,6 @@
 - [The V1DD functional-metrics fork](v1dd-functional-metrics-fork.md) — where it lives, which remote is which, merging from upstream and PRing back.
 - [The user handles commits](user-handles-commits.md) — leave work uncommitted in the working tree; they inspect the diff first.
-- [Sanity checks for the metrics asset](v1dd-metrics-asset-sanity-checks.md) — the numbers a full run must reproduce; the first reproducible run passed them all and failed three provenance checks.
+- [Sanity checks for the metrics asset](v1dd-metrics-asset-sanity-checks.md) — numbers a full run must reproduce; both reproducible runs passed every number and each exposed three provenance defects.
 - [V1DD metrics open questions](v1dd-metrics-open-questions.md) — deferred tuning, the unrecorded grating-window geometry, the 67%-low-confidence session, imperfections shipped on purpose.
 - [V1DD metrics speedups](v1dd-metrics-speedups.md) — speedup 1 (fit only used SF, ~2x) implemented 2026-09-01; speedup 2 (data-derived p0) still deferred.
 - [V1DD metrics refactor decisions](v1dd-metrics-refactor-decisions.md) — the pipeline/validation split: all sessions, correct the known defects, mouse from the NWB.
