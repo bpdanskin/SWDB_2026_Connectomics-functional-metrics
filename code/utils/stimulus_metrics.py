@@ -50,12 +50,13 @@ __all__ = [
     "receptive_field_metrics",
     "drifting_gratings_metrics",
     "surround_suppression_metrics",
-    "locomotion_metrics",
+    "roi_summary_metrics",
+    "spectral_snr",
     "window_containment",
     "DGResult",
     "SSI_COLUMNS",
     "CONTAINMENT_COLUMNS",
-    "LOCOMOTION_COLUMNS",
+    "ROI_SUMMARY_COLUMNS",
     "vonmises_two_peak",
     "vonmises_two_peak_fit",
     "vonmises_pref_dir",
@@ -148,6 +149,13 @@ class MetricConfig:
     #: Used only by `window_containment`; no metric that reproduces the historical
     #: tables depends on it.
     dgw_window_radius_deg: float = 15.0
+
+    # --- dF/F spectral SNR (roi_summary). Bands from the cell-cell correlations
+    # notebook, whose `snr_by_cell.feather` these are meant to be comparable with.
+    # Calcium transients occupy the signal band; the narrow band above them samples a
+    # spectrum that is close to flat for a well-isolated ROI.
+    snr_signal_band: Tuple[float, float] = (0.1, 1.5)
+    snr_noise_band: Tuple[float, float] = (2.0, 2.1)
     ssi_min_trials: int = 3
 
     # --- expensive extras, absent from every published table
@@ -230,9 +238,10 @@ OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
         "dgw_center_azimuth", "dgw_center_elevation",
         "dgw_rf_distance_on", "dgw_rf_distance_off",
         "dgw_rf_overlap_on", "dgw_rf_overlap_off"],
-    "locomotion": [
+    "roi_summary": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "pika_roi_confidence",
+        "snr", "signal_power", "noise_power",
         "run_frac", "spont_run_frac",
         "spont_rate", "spont_rate_run", "spont_rate_stat",
         "run_mod_dgf", "run_mod_dgw", "run_mod_spont"],
@@ -912,9 +921,62 @@ def surround_suppression_metrics(
 # ------------------------------------------------------------------- locomotion
 
 
-LOCOMOTION_COLUMNS = ["run_frac", "spont_run_frac",
-                      "spont_rate", "spont_rate_run", "spont_rate_stat",
-                      "run_mod_dgf", "run_mod_dgw", "run_mod_spont"]
+ROI_SUMMARY_COLUMNS = ["snr", "signal_power", "noise_power",
+                       "run_frac", "spont_run_frac",
+                       "spont_rate", "spont_rate_run", "spont_rate_stat",
+                       "run_mod_dgf", "run_mod_dgw", "run_mod_spont"]
+
+
+def spectral_snr(traces, fs: float, signal_band=(0.1, 1.5), noise_band=(2.0, 2.1),
+                 demean: bool = True):
+    """Per-ROI SNR from signal-band power against a white-noise reference band.
+
+    Ported from `Functional Data Cell-Cell Correlations.ipynb`
+    (`estimate_snr_white_noise_model`), which ships `snr_by_cell.feather` in the CCM
+    asset. Same bands and same scaling, so the two assets are directly comparable — but
+    **not bit-identical**: that notebook interpolates every plane onto one reference
+    timebase before the FFT, while this runs per plane on its own timestamps. Expect
+    agreement in distribution, not in the last digit.
+
+    Calcium transients live around 0.1-1.5 Hz. Above them the spectrum of a well-isolated
+    ROI is close to flat, so a narrow band at 2.0-2.1 Hz estimates the white-noise floor
+    per bin; scaling that by the number of signal bins gives the noise power the signal
+    band would contain if it held nothing but noise.
+
+    `traces` is `(n_frames, n_rois)` as NWB stores it -- transposed internally, unlike the
+    notebook's function, which expects the transpose already done.
+
+    **dF/F only.** On deconvolved events this measures nothing useful: deconvolution has
+    already removed the noise floor the reference band is meant to sample, so the
+    denominator is whatever numerical residue is left rather than a noise estimate.
+
+    Returns `(snr, signal_power, noise_power)`, each `(n_rois,)`. SNR is a power ratio,
+    not decibels -- the CCM notebook plots it on a log axis from 1 to 1e5.
+    """
+    x = np.asarray(traces, dtype=np.float64)
+    if x.ndim != 2:
+        raise ValueError(f"expected (n_frames, n_rois), got {x.shape}")
+    x = x.T                                            # -> (n_rois, n_frames)
+    n_time = x.shape[1]
+    if demean:
+        x = x - x.mean(axis=1, keepdims=True)          # kill the DC bin
+
+    freqs = np.fft.rfftfreq(n_time, d=1.0 / float(fs))
+    if noise_band[1] > freqs[-1]:
+        raise ValueError(
+            f"noise_band {noise_band} exceeds Nyquist {freqs[-1]:.3f} Hz at "
+            f"fs={fs:.3f} Hz -- choose a band below it")
+    power = np.abs(np.fft.rfft(x, axis=1)) ** 2
+
+    sig_mask = (freqs >= signal_band[0]) & (freqs <= signal_band[1])
+    noi_mask = (freqs >= noise_band[0]) & (freqs <= noise_band[1])
+    if not sig_mask.any() or not noi_mask.any():
+        raise ValueError(f"empty frequency band: signal={int(sig_mask.sum())} "
+                         f"noise={int(noi_mask.sum())} bins at fs={fs:.3f} Hz")
+
+    signal_power = power[:, sig_mask].sum(axis=1)
+    noise_power = power[:, noi_mask].mean(axis=1) * int(sig_mask.sum())
+    return signal_power / (noise_power + 1e-12), signal_power, noise_power
 
 
 def _run_modulation(resp, speeds, thr, min_trials):
@@ -933,7 +995,7 @@ def _run_modulation(resp, speeds, thr, min_trials):
     return _metric_index(r, s)
 
 
-def locomotion_metrics(
+def roi_summary_metrics(
     plane,
     dgw: Optional["DGResult"],
     dgf: Optional["DGResult"],
@@ -1015,9 +1077,17 @@ def locomotion_metrics(
     against a dF/F variant here does not apply there.)
     """
     n_rois = plane.n_rois
-    out = {c: np.full(n_rois, np.nan) for c in LOCOMOTION_COLUMNS}
+    out = {c: np.full(n_rois, np.nan) for c in ROI_SUMMARY_COLUMNS}
     thr = config.running_threshold_cm_s
     n_min = config.ssi_min_trials
+
+    # Recording quality, from dF/F -- the one quantity in this table that is not events.
+    dff = plane.traces.get("dff")
+    if dff is not None and plane.dt and np.isfinite(plane.dt):
+        snr, sig, noi = spectral_snr(dff, fs=1.0 / float(plane.dt),
+                                     signal_band=tuple(config.snr_signal_band),
+                                     noise_band=tuple(config.snr_noise_band))
+        out["snr"], out["signal_power"], out["noise_power"] = snr, sig, noi
 
     for name, res in (("dgf", dgf), ("dgw", dgw)):
         if res is None:

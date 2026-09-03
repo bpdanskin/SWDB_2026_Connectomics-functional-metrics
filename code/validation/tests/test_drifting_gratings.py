@@ -326,11 +326,11 @@ check("the default does not, so a fast run shows in differs_from_reference_confi
 print("\n[N] locomotion: running modulation across gratings and spontaneous")
 # Synthetic, so every expectation is analytic. build_session() marks the first half of
 # each condition's trials fast and the rest slow, which is what makes a split possible.
-loco = sm.locomotion_metrics(plane, dgw, dgf, spont, running)
+rs = loco = sm.roi_summary_metrics(plane, dgw, dgf, spont, running)
 check("one row per ROI", len(loco) == N_ROIS)
 check("column order matches the published schema",
-      list(sm.to_output_schema(loco, "locomotion").columns)
-      == list(sm.OUTPUT_COLUMNS["locomotion"]))
+      list(sm.to_output_schema(loco, "roi_summary").columns)
+      == list(sm.OUTPUT_COLUMNS["roi_summary"]))
 check("both grating types are reported",
       np.isfinite(loco["run_mod_dgf"]).any() and np.isfinite(loco["run_mod_dgw"]).any())
 check("the index is bounded in [-1, 1] like every other *_index column",
@@ -362,7 +362,7 @@ check("responds only while running -> +1",
 # Passing running=None removes only what needs the raw trace. The grating indices survive
 # because their per-trial speeds were already computed into the DGResult -- the caller not
 # having the trace to hand is not a reason to discard work already done.
-no_run = sm.locomotion_metrics(plane, dgw, dgf, spont, None)
+no_run = sm.roi_summary_metrics(plane, dgw, dgf, spont, None)
 check("without the running trace, session fractions and spontaneous are NaN",
       bool(no_run[["run_frac", "spont_run_frac", "run_mod_spont"]].isna().all().all()))
 check("but the grating indices survive, from the speeds held in the DGResult",
@@ -372,8 +372,8 @@ check("a one-sided session yields no index rather than a fabricated one",
       sm._run_modulation(resp, one_sided, thr, 3) is None,
       "13 of 25 real sessions are one-sided, so this is the common case")
 check("no dF/F columns: a ratio index is not safe on a signed trace",
-      not any(c.endswith("_dff") for c in sm.LOCOMOTION_COLUMNS),
-      str(sm.LOCOMOTION_COLUMNS))
+      not any(c.endswith("_dff") for c in sm.ROI_SUMMARY_COLUMNS),
+      str(sm.ROI_SUMMARY_COLUMNS))
 # The instability that motivated dropping them, as arithmetic rather than assertion.
 check("sum denominator is unbounded on near-cancelling signed responses",
       abs(sm._metric_index(0.050, -0.049)) > 50, f"{sm._metric_index(0.050, -0.049):.1f}")
@@ -407,7 +407,7 @@ check("run_mod_spont is exactly the index of the two shipped rates",
 # A one-sided session must still get a baseline and the state it does have. 13 of 25 real
 # sessions are one-sided, so this is the common case, not an edge case.
 still = (np.zeros_like(running[0]), running[1])
-one = sm.locomotion_metrics(plane, dgw, dgf, spont, still)
+one = sm.roi_summary_metrics(plane, dgw, dgf, spont, still)
 check("never-ran session: spont_rate still computed",
       bool(np.isfinite(one["spont_rate"]).all()))
 check("never-ran session: stationary rate kept, running rate NaN",
@@ -417,5 +417,62 @@ check("never-ran session: no modulation index invented",
       bool(one["run_mod_spont"].isna().all()))
 check("with no running at all, spont_rate == spont_rate_stat",
       np.allclose(one["spont_rate"], one["spont_rate_stat"]))
+
+print("\n[N] spectral SNR on dF/F")
+# Synthetic traces with a known answer: a sinusoid inside the signal band on top of white
+# noise. More noise must mean less SNR, and pure noise must sit near 1.
+FS = 1.0 / DT
+n_t = 4096
+tt = np.arange(n_t) / FS
+rng_s = np.random.default_rng(3)
+levels = [0.02, 0.1, 0.5]
+sig = np.sin(2 * np.pi * 0.5 * tt)                     # 0.5 Hz, inside 0.1-1.5
+traces = np.stack([sig + rng_s.normal(0, s, n_t) for s in levels]
+                  + [rng_s.normal(0, 0.1, n_t)], axis=1)   # last column: noise only
+snr, sig_p, noi_p = sm.spectral_snr(traces, fs=FS)
+
+check("one value per ROI, from (n_frames, n_rois) input", snr.shape == (4,), str(snr.shape))
+check("SNR falls monotonically as noise is added",
+      bool(np.all(np.diff(snr[:3]) < 0)), " > ".join(f"{v:.0f}" for v in snr[:3]))
+check("a pure-noise trace lands near 1", 0.2 < snr[3] < 5.0, f"{snr[3]:.2f}")
+check("the clean trace beats pure noise by orders of magnitude",
+      snr[0] / snr[3] > 100, f"ratio {snr[0] / snr[3]:.0f}")
+check("snr == signal_power / noise_power", np.allclose(snr, sig_p / (noi_p + 1e-12)))
+check("powers are positive", bool((sig_p > 0).all() and (noi_p > 0).all()))
+
+# scale invariance: SNR is a ratio, so doubling the trace must not move it
+check("invariant to trace gain",
+      np.allclose(sm.spectral_snr(traces * 7.0, fs=FS)[0], snr, rtol=1e-9))
+# and to a DC offset, because the estimator demeans
+check("invariant to a DC offset (the estimator demeans)",
+      np.allclose(sm.spectral_snr(traces + 3.0, fs=FS)[0], snr, rtol=1e-9))
+
+# guardrails
+try:
+    sm.spectral_snr(traces, fs=3.0)          # Nyquist 1.5 Hz, below the 2.0-2.1 band
+    check("raises when the noise band is above Nyquist", False)
+except ValueError as e:
+    check("raises when the noise band is above Nyquist", "Nyquist" in str(e))
+try:
+    sm.spectral_snr(traces[:, 0], fs=FS)
+    check("raises on a 1-D trace", False)
+except ValueError as e:
+    check("raises on a 1-D trace", "n_frames" in str(e))
+
+# in the table: dF/F only, NaN when that trace is absent
+check("snr is NaN when dff was not loaded (this fixture is events-only)",
+      bool(rs[["snr", "signal_power", "noise_power"]].isna().all().all()))
+dff_fix = np.abs(rng_s.normal(0.0, 0.05, size=(len(plane.timestamps), N_ROIS))) + 0.1
+plane_dff = vn.PlaneData(
+    mouse_id="409828", depth_um=150.0, column=1, volume="3", plane=0,
+    roi=np.arange(N_ROIS), is_valid=np.ones(N_ROIS, bool), timestamps=plane.timestamps,
+    traces={"events": plane.traces["events"], "dff": dff_fix},
+    roi_table=plane.roi_table, dt=DT)
+rs_dff = sm.roi_summary_metrics(plane_dff, dgw, dgf, spont, running)
+check("snr is populated once dff is present",
+      bool(np.isfinite(rs_dff["snr"]).all()), f"{rs_dff['snr'].round(2).tolist()}")
+check("adding dff does not disturb the events-derived columns",
+      all(np.allclose(rs[c], rs_dff[c], equal_nan=True)
+          for c in ("spont_rate", "run_mod_dgf", "run_mod_dgw", "run_frac")))
 
 summary()
