@@ -91,8 +91,9 @@ with tempfile.TemporaryDirectory() as tmp:
     names = sorted(n[:-4] for n in z.namelist())
     z.close()
     want = sorted(["roi_key", "plane_key", "directions", "spatial_frequencies",
-                   "trace_type", "dgw_trials", "dgw_blank", "dgw_params", "dgw_running",
-                   "dgf_trials", "dgf_blank", "dgf_params", "dgf_running"])
+                   "trace_type",
+                   "dgw_trials", "dgw_blank", "dgw_n_blank", "dgw_params", "dgw_running",
+                   "dgf_trials", "dgf_blank", "dgf_n_blank", "dgf_params", "dgf_running"])
     check("every promised array is present", names == want,
           str(sorted(set(want) ^ set(names))))
 
@@ -109,6 +110,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("roi_key spans the ROI axis", len(d["roi_key"]) == n_rois)
     check("plane_key spans the running-speed plane axis",
           len(d["plane_key"]) == N_PLANES)
+    check("blank counts key on the PLANE too, one per plane",
+          d["dgw_n_blank"].shape == (N_PLANES,), str(d["dgw_n_blank"].shape))
+    check("equal-width blanks are recorded at their true width, not a padded one",
+          d["dgw_n_blank"].tolist() == [N_BLANK] * N_PLANES, str(d["dgw_n_blank"]))
     # the join the file promises: strip a roi_key's trailing _{roi} to get its plane
     check("every roi_key prefix appears in plane_key",
           set(k.rsplit("_", 1)[0] for k in d["roi_key"]) <= set(d["plane_key"].tolist()))
@@ -143,14 +148,54 @@ def refuses(label, **kw):
     check(label, raised is not None, (raised or "nothing raised")[:96])
 
 
-# Blank counts are the one dimension the pre-flight never verified across sessions: the
-# 192 sweeps it checked are the non-blank total, and blank sweeps are intermingled.
-refuses("a plane with a different BLANK count is refused",
-        blank_counts=[N_BLANK, N_BLANK, 6])
 refuses("a plane with a different TRIAL count is refused",
         n_trials=[N_TRIALS, 7, N_TRIALS])
 refuses("running speeds out of step with plane keys are refused", drop_plane_key=True)
 refuses("an ROI-axis length that disagrees with the table is refused", short_roi_key=True)
+
+
+print("\n[2b] ragged BLANK counts are padded, not refused")
+# The 192 sweeps the pre-flight verified are the TOTAL per grating type, blanks included,
+# so a session showing more grey sweeps shows fewer grating trials. The 2026-09-03 run
+# measured 5-8 blanks per session, which is what this case now stands for: real data, not
+# a malformed accumulator. The old expectation -- a raise -- is what cost that run its
+# tuning-curve archive after five hours of compute.
+RAGGED = [N_BLANK, 6, 5]
+with tempfile.TemporaryDirectory() as tmp:
+    tuning, keys = make(blank_counts=RAGGED)
+    originals = [a.copy() for a in tuning["dgw"]["blank"]]
+    stdout = sys.stdout
+    sys.stdout = open(os.devnull, "w")
+    try:
+        run(tuning, keys, tmp=tmp)
+        raised = None
+    except Exception as exc:                                            # noqa: BLE001
+        raised = f"{type(exc).__name__}: {exc}"
+    finally:
+        sys.stdout.close()
+        sys.stdout = stdout
+    check("ragged blank counts no longer abort the archive", raised is None,
+          raised or "")
+    if raised is None:
+        d = np.load(pjoin(tmp, "tuning_curves_M409828.npz"), allow_pickle=True)
+        check("blanks are padded to the WIDEST plane",
+              d["dgw_blank"].shape == (N_PLANES * N_ROIS_PER, max(RAGGED)),
+              str(d["dgw_blank"].shape))
+        check("the true per-plane width is recorded, so a pad is not read as a zero",
+              d["dgw_n_blank"].tolist() == RAGGED, str(d["dgw_n_blank"]))
+        # padding must be NaN, not 0: a zero would be averaged into the baseline
+        for p, n in enumerate(RAGGED):
+            rows = slice(p * N_ROIS_PER, (p + 1) * N_ROIS_PER)
+            check(f"plane {p}: its {n} real sweeps survive unchanged",
+                  np.array_equal(d["dgw_blank"][rows, :n], originals[p]))
+            check(f"plane {p}: columns {n}..{max(RAGGED)} are NaN, not zero",
+                  bool(np.isnan(d["dgw_blank"][rows, n:]).all()),
+                  str(d["dgw_blank"][rows, n:]))
+        # what a reader actually does with the array
+        check("nanmean over the blank axis ignores the padding",
+              np.allclose(np.nanmean(d["dgw_blank"][:N_ROIS_PER * 3], axis=1)[-N_ROIS_PER:],
+                          np.nanmean(originals[2], axis=1), equal_nan=True))
+        d.close()
 
 
 print("\n[3] the condition-means writer cell")

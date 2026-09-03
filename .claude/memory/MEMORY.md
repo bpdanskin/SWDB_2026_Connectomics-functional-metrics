@@ -1,10 +1,11 @@
 - [The V1DD functional-metrics fork](v1dd-functional-metrics-fork.md) — where it lives, which remote is which, merging from upstream and PRing back.
 - [The user handles commits](user-handles-commits.md) — leave work uncommitted in the working tree; they inspect the diff first.
-- [Sanity checks for the metrics asset](v1dd-metrics-asset-sanity-checks.md) — numbers a full run must reproduce; both reproducible runs passed every number and each exposed three provenance defects.
+- [Sanity checks for the metrics asset](v1dd-metrics-asset-sanity-checks.md) — numbers a full run must reproduce; all three reproducible runs passed every number, and each exposed a different defect around them.
 - [V1DD metrics open questions](v1dd-metrics-open-questions.md) — deferred tuning, the unrecorded grating-window geometry, the 67%-low-confidence session, imperfections shipped on purpose.
 - [V1DD metrics speedups](v1dd-metrics-speedups.md) — speedup 1 (fit only used SF, ~2x) implemented 2026-09-01; speedup 2 (data-derived p0) still deferred.
 - [V1DD metrics refactor decisions](v1dd-metrics-refactor-decisions.md) — the pipeline/validation split: all sessions, correct the known defects, mouse from the NWB.
 - [V1DD stimulus-metrics port status](v1dd-stimulus-metrics-port-status.md) — complete; the milestone record and the two-seed control methodology.
+- [Drifting-gratings blank sweeps are ragged](dg-blank-sweeps-are-ragged.md) — 192 is the total including blanks; 5-8 blanks per session, and the assertion that assumed otherwise cost the 2026-09-03 run its array archives.
 - [Response windows: match now, tune later](response-window-deferred-tuning.md) — recovered values (DG 2.0 s, NI 0.33 s) and why windows behave as discrete sample counts.
 - [Population sparseness from the condition means](population-sparseness-from-condition-means.md) — the formula, the two readings of the paper definition, and why it is not a shipped column.
 - [AIND metadata for derived assets](aind-metadata-for-derived-assets.md) — working recipe + aind-data-schema 2.8.1 gotchas; reuse for the next data asset.

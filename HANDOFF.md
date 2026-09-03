@@ -18,11 +18,13 @@ NWB-Zarr sessions mounted in Code Ocean.
 
 **The port is complete and has shipped two assets**, the most recent on 2026-09-01.
 
-**A third run is due, and a lot has been added since the last one.** Everything under
-[Pending the next run](#pending-the-next-run) is implemented and unit-tested but **has
-never touched real data** — five new families' worth of columns, two new array archives,
-and a config flag. Treat those numbers as unverified until a run produces them. The
-2026-09-01 asset does not contain any of it.
+**The third run (2026-09-03) computed every metric and then failed writing the tuning
+curves.** All the new columns are now observed rather than promised, and the checklist
+numbers all reproduced — but the two new array archives and the provenance file were lost
+with the crash, so a fourth run is due. The bug is fixed. See
+[The 2026-09-03 run](#the-2026-09-03-run--everything-landed-except-the-two-array-archives)
+before launching, and [Pending the next run](#pending-the-next-run) for the decisions the
+launch still needs.
 
 ---
 
@@ -74,7 +76,7 @@ code/
     V1DD Preflight.ipynb
     preflight.py  compare.py  schema_report.py  diff_runs.py  checkpoints.py
     probe_window_center.py   one-off: why two sessions record no aperture centre
-    tests/        19 files, 666 checks, no pytest — run_all.py + a check() harness
+    tests/        19 files, 677 checks, no pytest — run_all.py + a check() harness
 results/409828_V1DD_stimulus_metrics_2026-08-16_19-40-03/   the shipped asset
 ```
 
@@ -109,7 +111,7 @@ Needs numpy/pandas, so it will not run in a bare environment. In the capsule:
 python code/validation/tests/run_all.py
 ```
 
-As of 2026-09-03 this reports **666 checks** across 19 files in a checkout, and **663 in
+As of 2026-09-03 this reports **677 checks** across 19 files in a checkout, and **674 in
 the capsule** — three checks in `test_entrypoint.py` cannot run without a git repository
 and now skip rather than fail. **Expect zero failures in both.** `test_reference_tables.py`
 skips whenever the `data_frames` asset is not attached.
@@ -257,6 +259,75 @@ suspecting the data.
 
 ---
 
+## The 2026-09-03 run — everything landed except the two array archives
+
+The third reproducible run (`bc940fc`, results copied to
+`data/results-V1DD_stimulus_metrics_2026-09-03_06-45-25/`) computed **every metric
+correctly** and then **died in the tuning-curve writer cell**, on an assertion that turned
+out to be wrong about the data. The processing loop had already finished, so the failure
+cost the run its last three outputs and nothing else.
+
+| landed | lost |
+|---|---|
+| 8 per-family CSVs, 39,407 rows each | `tuning_curves_M409828.npz` |
+| `stimulus_metrics_M409828.feather`, **39,407 x 81** | `condition_means_M409828.npz` |
+| `rf_maps_M409828.npz`, (39,407, 2, 8, 14) | `stimulus_metrics_provenance.json` |
+
+**The lost archives cannot be rebuilt from the partial outputs.** They come from
+trial-level arrays that live only in the processing loop's accumulators, and the CSVs are
+reductions of exactly those arrays. Recovering them means rerunning — there is no
+post-pass.
+
+Every number on the [checklist](#numbers-a-rerun-must-reproduce) reproduced from the
+partial outputs: 25 / 150 / 39,407, 1,038 low-confidence ROIs (2.63 %) all in column 4 /
+volume 1, the depth lattice exact, 13,555 distinct `roi_unique_id` for 39,407 unique
+`roi_key`, RF centres at the corrected +-32.55 / +-60.45 bounds, and the imputation
+filling **exactly 2,456 ROIs** in column 2 / volume 5 and column 4 / volume 1 with their
+columns' medians (column 2 showing its two distinct azimuths, -19.6 and -19.8).
+
+### Blank sweeps are ragged, and 192 is the total, not the gratings
+
+The assertion that killed the run said planes must agree on their blank-sweep count. They
+do not, and this file had the sweep arithmetic backwards: **192 is the TOTAL number of
+drifting-gratings sweeps per type, blank sweeps included** — not the non-blank total. A
+session with more grey sweeps therefore shows *fewer* grating trials, since 12 x 2 x 8
+condition slots only ever receive 184-187 of them.
+
+Measured over all 25 sessions (2026-09-03, stimulus tables only):
+
+| | `drifting_gratings_full` | `drifting_gratings_windowed` |
+|---|---|---|
+| total sweeps | 192 in all 25 | 192 in all 25 |
+| blank sweeps | 7 (8 sessions), 8 (17) | 5 (1), 6 (1), 7 (9), 8 (14) |
+| grating sweeps | 184-185 | 184-187 |
+
+Only **13 of 25** sessions run the same number of blanks for both grating types, so this
+is a per-stimulus property, not a per-session one. It also means the `trials` array is
+legitimately 5-8 NaN slots short of full for every plane, which is why it was NaN-padded
+from the start.
+
+**Fixed by padding rather than raising.** `dg{w,f}_blank` is now padded to the widest
+plane (8) with NaN, and `dg{w,f}_n_blank` `(n_planes,)` records the true width, keyed by
+`plane_key` like the running speeds. `np.nanmean(blank, axis=1)` gives the right baseline
+without consulting it. The raise was doing its job — it is how this was discovered — and
+`test_tuning_export.py` now asserts the padding is NaN and not zero, that real sweeps
+survive it, and that the recorded widths are the pre-pad ones. Trials, params and running
+shapes still raise, because a disagreement there really would be a stimulus that ran
+differently.
+
+### One thing to decide before the rerun
+
+The failure class is not fixed, only this instance of it. **A raise in either array-writer
+cell still costs the whole run its provenance**, because provenance and the manifest run
+after them and never execute. `condition_means`'s three assertions have still never
+touched real data. Wrapping the two writer cells the way the per-session loop is already
+wrapped — record the failure, print it loudly, carry on to provenance — would have turned
+this five-hour loss into one missing file and a `!!` line. Not done here: it changes the
+notebook's failure contract and `test_tuning_export.py` asserts against the current one,
+so it is your call.
+
+---
+
 ## NWB access reference
 
 Verified from stored output on session 794964451 (column 1 / volume 3). Every plane
@@ -354,14 +425,20 @@ And two additions the defects argued for:
    would be red on every commit).
 
 Test counts after this work: **666 checks in a checkout, 663 in the capsule** (3 skips),
-**0 failures in either**. `test_run_dirs.py` also lost a ~5 % flake that took two live
+**0 failures in either** — 677 / 674 once the blank-sweep fix added its checks.
+`test_run_dirs.py` also lost a ~5 % flake that took two live
 `run_stamp()` calls 50 ms apart and asserted they matched — false whenever they straddled
 a second boundary, and it printed the same "unit tests failed" banner over a clean asset.
 
 ### What is new
 
-Built and unit-tested 2026-09-02, **never run on real data**. The 2026-09-01 asset has
-none of it. Every number below is a schema promise, not an observation.
+Built and unit-tested 2026-09-02. **The 2026-09-03 run produced all of it** — every
+column below now exists in
+`data/results-V1DD_stimulus_metrics_2026-09-03_06-45-25/`, at the promised shapes, and the
+wide table came out **39,407 x 81** as the arithmetic below predicts. What that run did
+*not* produce is the two array archives and the provenance file; see
+[The 2026-09-03 run](#the-2026-09-03-run--everything-landed-except-the-two-array-archives).
+The 2026-09-01 asset still has none of it.
 
 Do them in **one rerun**, not several — each is a schema change and the run is ~5 h.
 
@@ -370,7 +447,7 @@ Do them in **one rerun**, not several — each is a schema change and the run is
 | table | columns | notes |
 |---|---|---|
 | `natural_images`, `natural_images_12`, `natural_movie` | `reliability`, `reliability_dff` | mean pairwise between-trial correlation. **No threshold, no bootstrap** — the only responsiveness measure here that does not depend on a cut against a spontaneous null |
-| `surround_supression_index` | `dgw_rf_distance_on/off`, `dgw_rf_overlap_on/off` | how much of each RF the grating aperture covered. **Reported, never used to filter** |
+| `surround_supression_index` | `dgw_rf_distance_on/off`, `dgw_rf_overlap_on/off` | how much of each RF the grating aperture covered. **Reported, never used to filter.** Non-NaN exactly where `has_rf_on`/`has_rf_off` is true (7,068 / 6,657 ROIs), and they reproduce the access notebook's ad-hoc numbers: 67.1 % of column 1's RF-on cells beyond 15 deg, r = -0.02 against `ssi` |
 | `surround_supression_index` | `dgw_center_inferred` | bool. True for the 2,456 ROIs whose aperture centre came from their column's median rather than from their own session |
 | **`roi_summary`** (new family) | `snr`, `signal_power`, `noise_power`, `run_frac`, `spont_run_frac`, `spont_rate`, `spont_rate_run`, `spont_rate_stat`, `run_mod_dgf`, `run_mod_dgw`, `run_mod_spont` | per-ROI measures not tied to any visual stimulus |
 
@@ -385,7 +462,9 @@ previously did not**, so that asset shipped a 6 MB file provenance never mention
 
 - **`tuning_curves_M409828.npz`** — the full `(n_rois, 12, 2, 8)` per-trial grating
   responses for both types, plus blank sweeps, von Mises parameters, and per-plane running
-  speeds. ~60 MiB raw. The published grating columns are six numbers standing in for 192;
+  speeds. ~60 MiB raw. Blank sweeps are **NaN-padded to 8 columns** with the true
+  per-plane count in `dg{w,f}_n_blank` — see
+  [Blank sweeps are ragged](#blank-sweeps-are-ragged-and-192-is-the-total-not-the-gratings). The published grating columns are six numbers standing in for 192;
   this is what they were computed from, so `preferred_dir` and `osi` become checkable by
   eye. `roi_key` joins to the wide table; `plane_key` is `roi_key` minus its trailing
   `_{roi}` and indexes the running speeds, which have no ROI axis.

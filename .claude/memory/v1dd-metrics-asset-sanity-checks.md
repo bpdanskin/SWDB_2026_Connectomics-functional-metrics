@@ -1,6 +1,6 @@
 ---
 name: v1dd-metrics-asset-sanity-checks
-description: "What to verify when a full stimulus-metrics run returns — expected numbers, the diff that should appear, and the provenance defects each reproducible run has exposed (three in 2026-08-16, three more in 2026-09-01)."
+description: "What to verify when a full stimulus-metrics run returns — expected numbers, the diff that should appear, and what each of the three reproducible runs exposed (2026-08-16, 2026-09-01, and the 2026-09-03 run that lost its array archives)."
 metadata: 
   node_type: memory
   type: project
@@ -15,12 +15,36 @@ tables with zero changed columns at `atol=0`. What it did *not* pass is in
 "What the first reproducible run got wrong" at the bottom; all three are fixed and none
 touches a metric.
 
+## The 2026-09-03 run: every metric right, the array archives lost
+
+The third reproducible run (`bc940fc`) computed all eight families and then **raised in
+the tuning-curve writer cell**, which assumed every plane ran the same number of blank
+sweeps. See [[dg-blank-sweeps-are-ragged]] — fixed by NaN-padding.
+
+**Landed** (in `data/results-V1DD_stimulus_metrics_2026-09-03_06-45-25/`): 8 per-family
+CSVs at 39,407 rows, the wide feather at **39,407 x 81**, `rf_maps` at
+(39,407, 2, 8, 14). **Lost:** `tuning_curves`, `condition_means`,
+`stimulus_metrics_provenance.json` — and **not rebuildable from the partial outputs**,
+because they come from trial-level accumulators the CSVs are reductions of. A fourth run
+is the only route.
+
+Every number in this file reproduced from the partial outputs. The new columns are
+therefore observed, not promised: `roi_summary` (11), the six `reliability` columns, the
+four `dgw_rf_*`, and `dgw_center_inferred`. `dgw_rf_distance_*` is non-NaN exactly where
+`has_rf_on`/`has_rf_off` is true (7,068 / 6,657) and reproduces the access notebook's
+exploratory figures — 67.1 % of column 1's RF-on cells beyond 15 deg, r = -0.02 against
+`ssi`.
+
+**The failure class is not closed.** Both array-writer cells run *before* provenance and
+the manifest, so a raise in either still forfeits the run's provenance. `condition_means`
+still has three assertions no real data has tested.
+
 ## Expected shape
 
 | | |
 |---|---|
 | sessions / planes / ROIs | **25 / 150 / 39,407** |
-| wide table | **39,407 x 59** (57 before adding `dgw_center_azimuth`/`dgw_center_elevation`) |
+| wide table | **39,407 x 81** as of 2026-09-03 (59 before the new families; 57 before `dgw_center_azimuth`/`dgw_center_elevation`) |
 | per-family CSVs | 7, each 39,407 rows |
 | runtime | ~7.2 h (~2.2 min/plane; drifting gratings is 96 % of it) |
 | `complete_asset` | `true`, `failed_sessions` empty |
@@ -150,8 +174,9 @@ Fixed in code, **not yet exercised by a run.** The next asset is what proves the
    there was no way to express it and they were left to fail. **A suite that can only skip
    at one granularity reports inapplicable checks as failures at the other.**
 
-Suite as of 2026-09-03: **18 passed, 1 skipped, 0 failed** — **666 checks in a checkout,
-663 in the capsule** (3 skips). Verified in both shapes by running it against a copy of
+Suite as of 2026-09-03: **18 passed, 1 skipped, 0 failed** — **677 checks in a checkout,
+674 in the capsule** (3 skips), after the blank-sweep padding checks. It was 666 / 663
+before those. Verified in both shapes by running it against a copy of
 `code/` with no `.git`, which is the shape a reproducible run actually has. A ~5 % flake in
 `test_run_dirs.py` — two live `run_stamp()` calls 50 ms apart asserted equal, false across
 a second boundary — was made deterministic at the same time, since it produced the same
