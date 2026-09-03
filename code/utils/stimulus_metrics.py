@@ -152,6 +152,20 @@ class MetricConfig:
     permutation_test_shuffles: int = 0
     chisq_shuffles: int = 0
     fit_tuning_curves: bool = True
+    #: Fit the von Mises curve at EVERY spatial frequency, not just the one surround
+    #: suppression reads. False is roughly 2x faster over a full run, because drifting
+    #: gratings dominate the runtime and half of every fit was being discarded.
+    #:
+    #: It changes no published column — `ssi_tuning_fit` is the only consumer and it
+    #: reads one SF per ROI — but it is **not** invisible in the asset: `tuning_curves`
+    #: exports `dgw_params` / `dgf_params`, and under False the unread SF is NaN. That
+    #: reads as a failed fit unless you know better. Set True for a completeness run.
+    #:
+    #: The original fitted every SF, so `REFERENCE_CONFIG` sets this True and a fast run
+    #: therefore shows up in `differs_from_reference_config`. That is deliberate: the
+    #: block answers "what did this run do differently", and once the parameters ship,
+    #: this qualifies.
+    fit_all_sf: bool = False
 
     # --- historical compatibility. These default to the CORRECTED behaviour; set both
     # True — or just use REFERENCE_CONFIG — to reproduce the historical tables exactly.
@@ -188,6 +202,7 @@ REFERENCE_CONFIG = MetricConfig(
     pref_cond_fillna=True,         # all-NaN ROIs report condition 0
     ni_response_frames=None,       # fall back to the recovered time window
     ni_response_seconds=0.33,
+    fit_all_sf=True,               # the original fitted every SF, not just the read one
 )
 
 
@@ -749,6 +764,9 @@ def drifting_gratings_metrics(
         _fit_sf = fit_sf_index
         if _fit_sf is None and dg_type == "windowed":
             _fit_sf = pref_cond_index[:, 1]   # self-select: saves ~half of windowed fits
+        if config.fit_all_sf:
+            _fit_sf = None        # completeness run: overrides the argument AND the
+                                  # windowed self-selection, which has no other escape
         for roi in range(n_rois):
             if not plane.is_valid[roi]:
                 continue

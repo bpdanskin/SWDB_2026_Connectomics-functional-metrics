@@ -24,7 +24,7 @@ touches a metric.
 | per-family CSVs | 7, each 39,407 rows |
 | runtime | ~7.2 h (~2.2 min/plane; drifting gratings is 96 % of it) |
 | `complete_asset` | `true`, `failed_sessions` empty |
-| `differs_from_reference_config` | exactly 3 entries |
+| `differs_from_reference_config` | **exactly 4 entries** from 2026-09-02 (was 3) |
 
 ## The diff that should appear
 
@@ -110,7 +110,7 @@ from `17cacea`. **Every metric is fine; three new provenance defects, all the sa
 as last time — a check running in a different shape than production.**
 
 Shape confirmed: 25 sessions / 150 planes / **39,407 ROIs**, `complete_asset` true,
-`failed_sessions` empty, `differs_from_reference_config` exactly 3, integrity **57/57**,
+`failed_sessions` empty, `differs_from_reference_config` exactly 3 (**4 from 2026-09-02**), integrity **57/57**,
 low-confidence session still 1,038 invalid (its 512 non-null SSI rows are 1,550 - 1,038).
 Runtime **4.83 h** (17,400.6 s), down from 7.2 h after speedup 1. New in the asset:
 `rf_maps_M409828.npz` and `dgw_center_*`. `format` is now populated per session.
@@ -142,6 +142,25 @@ on record still comes from the M1-M7 work. Attach the reference and set
    `git rev-parse` finds no repository.
 
 Suite now reports **15 passed, 1 skipped, 1 failed, 451 checks**.
+
+## `differs_from_reference_config` is 4 entries from 2026-09-02
+
+`fit_all_sf` joined `rf_center_scale_bug`, `pref_cond_fillna` and `ni_response_frames`.
+**A run reporting 3 is now out of date, not clean.**
+
+It is a different kind of entry from the other three, and the distinction matters when
+reading the block. Those three are deliberate *corrections of defects* and each changes
+published numbers. `fit_all_sf=False` is the fit-only-the-SF-that-gets-read speedup: it
+changes **no published column**, because `ssi_tuning_fit` reads one SF per ROI either way.
+
+It is in the block because it stopped being invisible. `tuning_curves_M409828.npz` exports
+`dgw_params` / `dgf_params`, and under the speedup the unread SF is NaN — which reads as a
+failed fit unless you know it was never attempted. `REFERENCE_CONFIG` sets `fit_all_sf=True`
+because the original fitted every SF.
+
+**Set `fit_all_sf=True` for a completeness run**, and expect roughly double the drifting-
+gratings time, which is ~96 % of the total. `differs_from_reference_config` then drops back
+to 3 entries — that is the one legitimate way to see 3 again.
 
 ## What no automated check covers
 

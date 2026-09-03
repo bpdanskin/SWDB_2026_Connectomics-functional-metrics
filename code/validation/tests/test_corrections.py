@@ -32,8 +32,15 @@ check("reference uses the 0.33 s window", r.ni_response_frames is None
 import dataclasses
 differing = {f.name for f in dataclasses.fields(sm.MetricConfig)
              if getattr(d, f.name) != getattr(r, f.name)}
-check("exactly three settings differ", differing == {
-    "rf_center_scale_bug", "pref_cond_fillna", "ni_response_frames"}, str(sorted(differing)))
+check("reference fits every spatial frequency, as the original did",
+      r.fit_all_sf is True and d.fit_all_sf is False)
+# Four, not three, since 2026-09-02. The first three are deliberate CORRECTIONS of
+# defects and change published numbers. `fit_all_sf` is a performance choice that changes
+# no published column — but it leaves half of the exported tuning_curves `*_params` NaN,
+# so once those arrays ship it belongs in the "what did this run do differently" block.
+check("exactly four settings differ", differing == {
+    "rf_center_scale_bug", "pref_cond_fillna", "ni_response_frames", "fit_all_sf"},
+    str(sorted(differing)))
 
 print("\n[1] receptive-field centres: corrected == historical * n/(n-1), exactly")
 alt = (np.arange(8) - 4 + 0.5) * 9.3

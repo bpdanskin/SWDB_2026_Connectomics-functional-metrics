@@ -223,4 +223,104 @@ ssp = sm.to_output_schema(ssi, "surround_supression_index")
 check("SSI column order matches published (misspelling kept)",
       list(ssp.columns) == list(sm.OUTPUT_COLUMNS["surround_supression_index"]))
 
+print("\n[N] tuning curves survive to the exported arrays")
+# What the .npz ships is DGResult.trial_responses verbatim. The property that matters is
+# that the published scalar columns are recoverable from it -- otherwise the array and the
+# table could drift and nothing would notice.
+tc = dgw.trial_responses                      # (n_rois, n_dir, n_sf, n_trials)
+curve = np.nanmean(tc, axis=3)                # (n_rois, n_dir, n_sf) -- the tuning curves
+
+check("trial array is float-typed and finite where trials exist",
+      np.isfinite(tc).any() and tc.dtype.kind == "f")
+check("float32 round-trip preserves the curve to single precision",
+      np.allclose(np.nanmean(tc.astype(np.float32), axis=3), curve,
+                  rtol=1e-6, atol=1e-9, equal_nan=True),
+      "the export casts to float32")
+
+# preferred_dir must be the argmax of the curve at the preferred SF -- the same reduction
+# the published column reports, recomputed from the shipped array
+for roi in range(min(N_ROIS, 4)):
+    if not np.isfinite(m.preferred_sf[roi]):
+        continue
+    sf_i = int(np.argmin(np.abs(dgw.sf_list - m.preferred_sf[roi])))
+    at_pref = curve[roi, :, sf_i]
+    if not np.isfinite(at_pref).any():
+        continue
+    recovered = dgw.dir_list[int(np.nanargmax(at_pref))]
+    check(f"ROI {roi}: preferred_dir recomputed from the array matches the column",
+          recovered == m.preferred_dir[roi],
+          f"array {recovered} vs column {m.preferred_dir[roi]}")
+
+# osi recomputed from the array, for the ROI whose analytic value is known above
+sf_i = int(np.argmin(np.abs(dgw.sf_list - m.preferred_sf[0])))
+at_pref = curve[0, :, sf_i]
+di = int(np.nanargmax(at_pref))
+orth = 0.5 * (at_pref[(di + 3) % 12] + at_pref[(di - 3) % 12])
+check("ROI 0: osi recomputed from the shipped array equals the published column",
+      abs((at_pref[di] - orth) / (at_pref[di] + orth) - m.osi[0]) < 1e-9)
+
+check("blank sweeps are per-ROI and separate from the conditions",
+      dgw.blank_responses.shape[0] == N_ROIS
+      and dgw.blank_responses.shape[1] not in (12, 24))
+check("running speeds have no ROI axis, so they key on the plane",
+      dgw.trial_running_speeds.shape == (12, 2, N_TRIALS),
+      str(dgw.trial_running_speeds.shape))
+check("tuning params are (n_rois, n_sf, 6) von Mises coefficients",
+      dgw.tuning_params.shape == (N_ROIS, 2, 6), str(dgw.tuning_params.shape))
+# after the fit-only-the-used-SF speedup the unread SF is NaN BY DESIGN; a reader who
+# does not know that will report it as a failed fit
+fitted_per_roi = np.isfinite(dgw.tuning_params).all(axis=2).sum(axis=1)
+check("at most one SF is fitted per ROI (the speedup, not a fit failure)",
+      bool((fitted_per_roi <= 1).all()), f"max fitted SFs = {int(fitted_per_roi.max())}")
+
+print("\n[N] fit_all_sf: both settings exercised, because a documented flag is not an "
+      "implemented one")
+# The pref_cond_fillna incident: a flag declared, documented, and never read, so flipping
+# it was a silent no-op. Anything with a flag gets both settings run and asserted to
+# differ.
+cfg_all = sm.MetricConfig(fit_all_sf=True)
+dgw_all = sm.drifting_gratings_metrics(plane, trials, is_blank, spont, running,
+                                       dg_type="windowed", config=cfg_all,
+                                       rng=np.random.default_rng(0))
+dgf_all = sm.drifting_gratings_metrics(plane_f, trials_f, blank_f, spont_f, running_f,
+                                       dg_type="full", config=cfg_all,
+                                       fit_sf_index=dgw_all.pref_cond_index[:, 1],
+                                       rng=np.random.default_rng(0))
+
+fitted_fast = np.isfinite(dgw.tuning_params).all(axis=2).sum(axis=1)
+fitted_all = np.isfinite(dgw_all.tuning_params).all(axis=2).sum(axis=1)
+check("default fits at most one SF per ROI", bool((fitted_fast <= 1).all()),
+      f"max {int(fitted_fast.max())}")
+check("fit_all_sf=True fits more SFs than the default",
+      int(fitted_all.sum()) > int(fitted_fast.sum()),
+      f"{int(fitted_all.sum())} vs {int(fitted_fast.sum())} (ROI, SF) fits")
+check("fit_all_sf=True overrides the WINDOWED self-selection, which has no other escape",
+      bool((fitted_all >= fitted_fast).all() and (fitted_all > 1).any()),
+      f"max fitted SFs {int(fitted_all.max())}")
+# Note the `dgf` fixture above passes no fit_sf_index, so it already fits every SF --
+# unlike the notebook, which passes dgw's preferred SF. The override has to be tested
+# against a call that is actually using the speedup.
+dgf_fast = sm.drifting_gratings_metrics(plane_f, trials_f, blank_f, spont_f, running_f,
+                                        dg_type="full",
+                                        fit_sf_index=dgw.pref_cond_index[:, 1],
+                                        rng=np.random.default_rng(0))
+check("fit_all_sf=True overrides an explicit fit_sf_index on full field",
+      int(np.isfinite(dgf_all.tuning_params).all(axis=2).sum())
+      > int(np.isfinite(dgf_fast.tuning_params).all(axis=2).sum()),
+      f"{int(np.isfinite(dgf_all.tuning_params).all(axis=2).sum())} vs "
+      f"{int(np.isfinite(dgf_fast.tuning_params).all(axis=2).sum())} (ROI, SF) fits")
+
+# The flag must not move a published column: ssi_tuning_fit reads one SF per ROI either
+# way, so the extra fits are genuinely extra.
+ssi_all = sm.surround_suppression_metrics(dgw_all, dgf_all, plane, config=cfg_all)
+check("no published SSI column moves when the extra SFs are fitted",
+      all(np.allclose(ssi[c], ssi_all[c], equal_nan=True, rtol=1e-9, atol=1e-12)
+          for c in sm.SSI_COLUMNS),
+      "output-neutral for the tables, not for the exported params")
+
+check("REFERENCE_CONFIG fits every SF, as the original did",
+      sm.REFERENCE_CONFIG.fit_all_sf is True)
+check("the default does not, so a fast run shows in differs_from_reference_config",
+      sm.DEFAULT_CONFIG.fit_all_sf is False)
+
 summary()
