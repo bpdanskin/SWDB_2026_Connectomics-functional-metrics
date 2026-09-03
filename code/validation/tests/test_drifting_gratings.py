@@ -323,4 +323,99 @@ check("REFERENCE_CONFIG fits every SF, as the original did",
 check("the default does not, so a fast run shows in differs_from_reference_config",
       sm.DEFAULT_CONFIG.fit_all_sf is False)
 
+print("\n[N] locomotion: running modulation across gratings and spontaneous")
+# Synthetic, so every expectation is analytic. build_session() marks the first half of
+# each condition's trials fast and the rest slow, which is what makes a split possible.
+loco = sm.locomotion_metrics(plane, dgw, dgf, spont, running)
+check("one row per ROI", len(loco) == N_ROIS)
+check("column order matches the published schema",
+      list(sm.to_output_schema(loco, "locomotion").columns)
+      == list(sm.OUTPUT_COLUMNS["locomotion"]))
+check("both grating types are reported",
+      np.isfinite(loco["run_mod_dgf"]).any() and np.isfinite(loco["run_mod_dgw"]).any())
+check("the index is bounded in [-1, 1] like every other *_index column",
+      bool(loco[["run_mod_dgf", "run_mod_dgw"]].stack().dropna().between(-1, 1).all()))
+check("run_frac is a fraction and constant within the plane",
+      bool(0 <= loco["run_frac"].iloc[0] <= 1) and loco["run_frac"].nunique() == 1,
+      f"{loco['run_frac'].iloc[0]:.3f}")
+
+# the literature formula, not the paper's: denominator is the SUM, not the max
+resp = dgw.trial_responses
+spd = dgw.trial_running_speeds
+thr = sm.DEFAULT_CONFIG.running_threshold_cm_s
+r = np.nanmean(np.where((spd > thr)[None], resp, np.nan).reshape(N_ROIS, -1), axis=1)
+s_ = np.nanmean(np.where((spd < thr)[None], resp, np.nan).reshape(N_ROIS, -1), axis=1)
+check("run_mod_dgw == (R_run - R_stat) / (R_run + R_stat), pooled over all trials",
+      np.allclose((r - s_) / (r + s_), loco["run_mod_dgw"], equal_nan=True, rtol=1e-12),
+      "sum in the denominator, not the max")
+
+# a cell whose response does not depend on running has an index of exactly zero
+flat = np.ones_like(resp)
+check("no running dependence -> exactly 0",
+      abs(float(sm._run_modulation(flat, spd, thr, 3)[0])) < 1e-12)
+# and one that only responds while running saturates at +1
+only_run = np.where((spd > thr)[None], 1.0, 0.0) * np.ones_like(resp)
+check("responds only while running -> +1",
+      abs(float(sm._run_modulation(only_run, spd, thr, 3)[0]) - 1.0) < 1e-12)
+
+# degrade paths: no running data, and too few trials on one side
+# Passing running=None removes only what needs the raw trace. The grating indices survive
+# because their per-trial speeds were already computed into the DGResult -- the caller not
+# having the trace to hand is not a reason to discard work already done.
+no_run = sm.locomotion_metrics(plane, dgw, dgf, spont, None)
+check("without the running trace, session fractions and spontaneous are NaN",
+      bool(no_run[["run_frac", "spont_run_frac", "run_mod_spont"]].isna().all().all()))
+check("but the grating indices survive, from the speeds held in the DGResult",
+      np.isfinite(no_run["run_mod_dgw"]).any() and np.isfinite(no_run["run_mod_dgf"]).any())
+one_sided = np.full_like(spd, 5.0)          # every trial running, none stationary
+check("a one-sided session yields no index rather than a fabricated one",
+      sm._run_modulation(resp, one_sided, thr, 3) is None,
+      "13 of 25 real sessions are one-sided, so this is the common case")
+check("no dF/F columns: a ratio index is not safe on a signed trace",
+      not any(c.endswith("_dff") for c in sm.LOCOMOTION_COLUMNS),
+      str(sm.LOCOMOTION_COLUMNS))
+# The instability that motivated dropping them, as arithmetic rather than assertion.
+check("sum denominator is unbounded on near-cancelling signed responses",
+      abs(sm._metric_index(0.050, -0.049)) > 50, f"{sm._metric_index(0.050, -0.049):.1f}")
+check("and inverts sign when both responses are negative",
+      sm._metric_index(-0.010, -0.050) < 0,
+      "running raised the response, yet the index reads negative")
+check("neither failure can occur on non-negative events",
+      sm._metric_index(0.050, 0.049) > 0 and abs(sm._metric_index(0.050, 0.049)) <= 1)
+
+# --- spontaneous activity level -------------------------------------------------
+check("spont_rate is populated for every ROI",
+      bool(np.isfinite(loco["spont_rate"]).all()),
+      f"{loco['spont_rate'].round(4).tolist()}")
+check("spont_rate is non-negative, as an events mean must be",
+      bool((loco["spont_rate"] >= 0).all()))
+# The fixture fills the spontaneous block with gamma(1.0, 0.1) noise, mean 0.1
+check("spont_rate recovers the synthetic spontaneous mean (~0.1)",
+      bool(loco["spont_rate"].between(0.05, 0.15).all()),
+      f"mean {loco['spont_rate'].mean():.4f}")
+check("the state split brackets the overall rate",
+      bool(((loco[["spont_rate_run", "spont_rate_stat"]].min(axis=1) <= loco["spont_rate"])
+            & (loco["spont_rate"] <= loco[["spont_rate_run", "spont_rate_stat"]].max(axis=1))
+            ).all()),
+      "an overall mean must lie between the two conditional means")
+check("run_mod_spont is exactly the index of the two shipped rates",
+      np.allclose(sm._metric_index(loco["spont_rate_run"].to_numpy(),
+                                   loco["spont_rate_stat"].to_numpy()),
+                  loco["run_mod_spont"], equal_nan=True),
+      "so a consumer can gate on magnitude and recompute")
+
+# A one-sided session must still get a baseline and the state it does have. 13 of 25 real
+# sessions are one-sided, so this is the common case, not an edge case.
+still = (np.zeros_like(running[0]), running[1])
+one = sm.locomotion_metrics(plane, dgw, dgf, spont, still)
+check("never-ran session: spont_rate still computed",
+      bool(np.isfinite(one["spont_rate"]).all()))
+check("never-ran session: stationary rate kept, running rate NaN",
+      bool(np.isfinite(one["spont_rate_stat"]).all())
+      and bool(one["spont_rate_run"].isna().all()))
+check("never-ran session: no modulation index invented",
+      bool(one["run_mod_spont"].isna().all()))
+check("with no running at all, spont_rate == spont_rate_stat",
+      np.allclose(one["spont_rate"], one["spont_rate_stat"]))
+
 summary()

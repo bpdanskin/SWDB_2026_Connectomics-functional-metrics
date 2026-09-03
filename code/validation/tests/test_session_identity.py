@@ -119,9 +119,10 @@ check("it is identity, not a metric -- absent_frame keeps it",
                           "rf_metrics")["pika_roi_confidence"].tolist() == conf)
 
 print("\n[4] depth_um reaches every output table")
-for fam in ("drifting_gratings_full", "drifting_gratings_windowed", "natural_images",
-            "natural_images_12", "natural_movie", "surround_supression_index",
-            "rf_metrics"):
+# Driven from OUTPUT_COLUMNS rather than a hand-written list: a new family then gets
+# these checks automatically instead of silently skipping them, which is how `locomotion`
+# would have slipped through.
+for fam in sorted(sm.OUTPUT_COLUMNS):
     check(f"{fam} schema has depth_um", "depth_um" in sm.OUTPUT_COLUMNS[fam])
     check(f"{fam} schema has pika_roi_confidence",
           "pika_roi_confidence" in sm.OUTPUT_COLUMNS[fam])
@@ -130,8 +131,7 @@ check("depth_um sits after the four join keys",
       == sm.OUTPUT_COLUMNS["natural_images"].index("roi") + 1)
 
 print("\n[5] absent_frame: an absent stimulus reads as absent, not as zero")
-for fam in ("natural_movie", "natural_images_12", "rf_metrics",
-            "drifting_gratings_full", "surround_supression_index"):
+for fam in sorted(sm.OUTPUT_COLUMNS):
     a = sm.absent_frame(fake_plane(), fam)
     out = sm.to_output_schema(a, fam)
     check(f"{fam}: schema and row count intact",
@@ -146,7 +146,10 @@ for fam in ("natural_movie", "natural_images_12", "rf_metrics",
               not out[["has_rf_on", "has_rf_off", "has_rf_on_or_off"]].to_numpy().any())
         rest = [c for c in metrics if not c.startswith("has_rf_")]
         check("rf: centres are NaN", bool(out[rest].isna().all().all()))
-    elif fam in ("natural_movie", "natural_images_12"):
+    elif "pref_img" in metrics:
+        # Keyed on the SCHEMA, not on a list of family names. Keyed on names this missed
+        # natural_images, which shares this schema and was simply absent from the
+        # hand-written list -- the same drift the loop above now prevents.
         check(f"{fam}: pref_img uses the -1 sentinel", bool((out["pref_img"] == -1).all()))
         rest = [c for c in metrics if c != "pref_img"]
         check(f"{fam}: remaining metrics NaN", bool(out[rest].isna().all().all()))

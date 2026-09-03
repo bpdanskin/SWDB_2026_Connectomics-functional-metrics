@@ -50,10 +50,12 @@ __all__ = [
     "receptive_field_metrics",
     "drifting_gratings_metrics",
     "surround_suppression_metrics",
+    "locomotion_metrics",
     "window_containment",
     "DGResult",
     "SSI_COLUMNS",
     "CONTAINMENT_COLUMNS",
+    "LOCOMOTION_COLUMNS",
     "vonmises_two_peak",
     "vonmises_two_peak_fit",
     "vonmises_pref_dir",
@@ -228,6 +230,12 @@ OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
         "dgw_center_azimuth", "dgw_center_elevation",
         "dgw_rf_distance_on", "dgw_rf_distance_off",
         "dgw_rf_overlap_on", "dgw_rf_overlap_off"],
+    "locomotion": [
+        "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
+        "pika_roi_confidence",
+        "run_frac", "spont_run_frac",
+        "spont_rate", "spont_rate_run", "spont_rate_stat",
+        "run_mod_dgf", "run_mod_dgw", "run_mod_spont"],
     "rf_metrics": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "pika_roi_confidence",
@@ -662,6 +670,7 @@ def drifting_gratings_metrics(
     ta = tr.trial_array(sweeps[~is_blank], code, n_trials=n_trials,
                         n_conditions=n_dir * n_sf)
     ta = ta.reshape(n_dir, n_sf, n_trials, plane.n_rois).transpose(3, 0, 1, 2)
+
     blank = sweeps[is_blank].T if bool(is_blank.any()) else np.empty((plane.n_rois, 0))
 
     mean_tr = _nanmean(ta, axis=3)                       # (n_rois, n_dir, n_sf)
@@ -896,6 +905,170 @@ def surround_suppression_metrics(
                 raise ValueError(
                     f"containment has {len(containment)} rows, plane has {n_rois} ROIs")
             frame[c] = np.asarray(containment[c], dtype=np.float64)
+    return frame
+
+
+
+# ------------------------------------------------------------------- locomotion
+
+
+LOCOMOTION_COLUMNS = ["run_frac", "spont_run_frac",
+                      "spont_rate", "spont_rate_run", "spont_rate_stat",
+                      "run_mod_dgf", "run_mod_dgw", "run_mod_spont"]
+
+
+def _run_modulation(resp, speeds, thr, min_trials):
+    """(R_run - R_stat) / (R_run + R_stat) per ROI, pooled over every trial.
+
+    `resp` is (n_rois, n_dir, n_sf, n_trials), `speeds` (n_dir, n_sf, n_trials).
+    """
+    if resp is None or speeds is None:
+        return None
+    run = speeds > thr
+    stat = speeds < thr                      # strict both sides: exactly thr is neither,
+    if run.sum() < min_trials or stat.sum() < min_trials:   # matching the ssi convention
+        return None
+    r = _nanmean(np.where(run[None], resp, np.nan).reshape(resp.shape[0], -1), axis=1)
+    s = _nanmean(np.where(stat[None], resp, np.nan).reshape(resp.shape[0], -1), axis=1)
+    return _metric_index(r, s)
+
+
+def locomotion_metrics(
+    plane,
+    dgw: Optional["DGResult"],
+    dgf: Optional["DGResult"],
+    spont: Sequence[float],
+    running: Optional[Sequence[np.ndarray]] = None,
+    *,
+    config: MetricConfig = DEFAULT_CONFIG,
+    mouse: Optional[str] = None,
+) -> pd.DataFrame:
+    """How much locomotion changes each neuron's activity, across three conditions.
+
+    `(R_run - R_stat) / (R_run + R_stat)`, the conventional index and the same form as
+    every `ssi_*` column. **Not** the white paper's `C*(Rmax - Rmin)/Rmax`, which divides
+    by the max rather than the sum; that would put a second convention in the same asset
+    for no gain, and the two are monotonically related anyway.
+
+    Three conditions, all on **deconvolved events only**:
+
+    * **`run_mod_dgf` / `run_mod_dgw`** — full-field and windowed gratings. Having both
+      is a cross-check on `ssi_running` / `ssi_stationary`, which split the same trials at
+      the same threshold but only at each ROI's preferred condition.
+    * **`run_mod_spont`** — the spontaneous block, where nothing is on the screen. This is
+      the control: locomotion modulates cortex whether or not there is a stimulus, so a
+      grating index should be read against this rather than against zero.
+
+    `spont_rate` is the mean activity over the whole spontaneous block, with
+    `spont_rate_run` / `spont_rate_stat` the same quantity split by state. They are here
+    for two reasons. They are the magnitudes behind `run_mod_spont`, so a ratio built from
+    two near-zero numbers can be gated rather than trusted. And `spont_rate` is the only
+    per-ROI **baseline activity level** in the asset — how much a neuron does with nothing
+    on the screen — which is useful well beyond locomotion: as a normaliser for evoked
+    responses, and for spotting unusually silent or hyperactive cells.
+
+    Note `spont_rate` is **not** recoverable from the other two. `spont_run_frac` is a
+    fraction of *time* on the running trace's own ~59 Hz samples (the white paper's
+    definition), while the split above classifies *imaging frames*; the two are close but
+    are not the weights that would recombine the state means. So the overall level is
+    computed and shipped rather than left to be derived.
+
+    **Pooled over all trials, not computed at the preferred condition.** That is forced by
+    the data, not preference. `ssi_running` needs >=3 running trials at one condition out
+    of 8, and only **6.3 % of ROIs in 9 of 25 sessions** clear that bar — running here is
+    close to all-or-nothing per session, with many sessions 100 % stationary and two 100 %
+    running. Pooling over all 192 grating trials makes the same threshold easy wherever
+    the animal ran at all.
+
+    `run_frac` (whole session) and `spont_run_frac` (the spontaneous block alone) are
+    reported beside them because they say whether any of it is interpretable — the paper
+    gates its locomotion analyses at a running fraction of 0.2, and the two fractions can
+    differ substantially.
+
+    **Events only, deliberately — a ratio index is not safe on a signed trace.** With
+    non-negative events `R_run + R_stat` is a sum of magnitudes and vanishes only for a
+    silent cell. On signed dF/F the same expression breaks in two ways: near-cancelling
+    responses of opposite sign give an unbounded index (+0.050 vs -0.049 -> 99), and when
+    both responses are negative the sign inverts, so a suppressed cell that is *less*
+    suppressed while running scores negative.
+
+    For `spont_rate` the case against dF/F is stronger still, and different: dF/F is
+    defined against a rolling baseline, so its mean over a long stimulus-free block is
+    ~0 **by construction**. It would not be unstable, it would be uninformative.
+
+    The white paper's `C*(Rmax - Rmin)/Rmax` does not rescue the ratio; it is worse. Its
+    denominator can itself be negative -- `max(-0.01, -0.05) = -0.01` -- giving -4.0 for
+    that same both-negative case. Rectifying, or dividing by `|R_run| + |R_stat|`, would
+    fix the sign and the bound, but neither fixes the deeper problem below, and a dF/F
+    column would then need a different formula from every other index in this asset.
+
+    **What no denominator fixes**, and which applies to events too: when both responses
+    are near zero the ratio is large and meaningless. `R_run = 1e-6, R_stat = 2e-6` gives
+    -0.33 under every variant. That is a signal-to-noise problem. Gate on magnitude before
+    trusting a value from a quiet cell -- for the gratings the raw per-trial responses and
+    running speeds are both in `tuning_curves_*.npz`, so `R_run` and `R_stat` can be
+    recomputed and thresholded however you like; for the spontaneous block, gate on
+    `spont_rate_run` / `spont_rate_stat`.
+
+    (Note the contrast with `reliability`, which *is* reported on both trace types. That
+    is a correlation -- invariant to sign and scale, no denominator -- so the argument
+    against a dF/F variant here does not apply there.)
+    """
+    n_rois = plane.n_rois
+    out = {c: np.full(n_rois, np.nan) for c in LOCOMOTION_COLUMNS}
+    thr = config.running_threshold_cm_s
+    n_min = config.ssi_min_trials
+
+    for name, res in (("dgf", dgf), ("dgw", dgw)):
+        if res is None:
+            continue
+        got = _run_modulation(res.trial_responses, res.trial_running_speeds, thr, n_min)
+        if got is not None:
+            out[f"run_mod_{name}"] = got
+
+    if running is not None:
+        speed, rts = np.asarray(running[0], dtype=np.float64), np.asarray(running[1])
+        moving = speed > thr
+        out["run_frac"] = np.full(n_rois, float(moving.mean()) if moving.size else np.nan)
+
+        # Spontaneous has no trials, so each imaging frame is the unit: classify the frame
+        # by the running speed over its own interval, then average the trace within each
+        # class. No padding, unlike the trial windows -- frames are contiguous, so a pad
+        # would count the same running samples into both neighbours.
+        t0, t1 = float(spont[0]), float(spont[1])
+        in_spont = (rts >= t0) & (rts <= t1)
+        out["spont_run_frac"] = np.full(
+            n_rois, float((speed[in_spont] > thr).mean()) if in_spont.any() else np.nan)
+
+        ts = np.asarray(plane.timestamps, dtype=np.float64)
+        frames = np.flatnonzero((ts >= t0) & (ts <= t1))
+        if frames.size:
+            cs, counts = tr.prefix_sums(speed[:, None])
+            a = np.searchsorted(rts, ts[frames], side="left")
+            b = np.searchsorted(rts, ts[frames] + plane.dt, side="right")
+            per_frame = tr.window_means(cs, counts, a, b)[:, 0]
+            run_f = per_frame > thr
+            stat_f = per_frame < thr
+            # Same trace the gratings use, so every number in this table is in one
+            # currency: mean event magnitude per imaging sample.
+            traces = plane.traces.get(config.trace_type["drifting_gratings_full"])
+            if traces is not None:
+                block = np.asarray(traces)[frames]           # (n_spont_frames, n_rois)
+                # Gated separately, on purpose. A session where the animal never ran still
+                # has a baseline rate and a stationary rate; requiring both states would
+                # throw those away, and 13 of 25 sessions here are one-sided.
+                out["spont_rate"] = _nanmean(block, axis=0)
+                if run_f.sum() >= n_min:
+                    out["spont_rate_run"] = _nanmean(block[run_f], axis=0)
+                if stat_f.sum() >= n_min:
+                    out["spont_rate_stat"] = _nanmean(block[stat_f], axis=0)
+                if run_f.sum() >= n_min and stat_f.sum() >= n_min:
+                    out["run_mod_spont"] = _metric_index(out["spont_rate_run"],
+                                                         out["spont_rate_stat"])
+
+    frame = roi_frame(plane, mouse=mouse)
+    for k, v in out.items():
+        frame[k] = v
     return frame
 
 
