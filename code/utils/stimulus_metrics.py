@@ -141,6 +141,27 @@ class MetricConfig:
     sig_p_thresh: float = 0.05
 
     # --- responsiveness thresholds (different per family in the original)
+    #
+    # A fraction is not a comparable criterion across datasets, because the same fraction
+    # is a different statistical test at a different trial count. Each trial has a 5 %
+    # chance of passing `sig_p_thresh` by chance, so the false-positive rate is the
+    # binomial tail:
+    #
+    #   de Vries 2019   >= 25 %  = 4 of 15 trials  ->  0.0055
+    #   here            >= 25 %  = 2 of 8          ->  0.0572   (10x LOOSER)
+    #   here            >= 37.5 % = 3 of 8         ->  0.0058   (matched)
+    #   here            >= 50 %  = 4 of 8          ->  0.00037  (15x STRICTER)
+    #
+    # So 0.50 here is much stricter than the Brain Observatory's nominally-lower 0.25,
+    # and **`>= 0.375` is the like-for-like comparison** — not 0.25. Comparing our
+    # `is_responsive` rate against their 25 % figure without that adjustment makes V1DD
+    # look less responsive than it is. 0.50 is kept because it reproduces the V1DD white
+    # paper's 26 % headline; see [[v1dd-metrics-open-questions]].
+    #
+    # A second wrinkle: the denominator is not always 8. Blank sweeps are ragged, so
+    # 184-187 grating sweeps land in 192 condition slots and some conditions get 7 trials.
+    # `frac_responsive_trials` therefore takes 23 distinct values in the shipped asset,
+    # not 9 — see [[dg-blank-sweeps-are-ragged]].
     dg_frac_thresh: float = 0.50
     ni_frac_thresh: float = 0.25
     rf_frac_thresh: float = 0.25

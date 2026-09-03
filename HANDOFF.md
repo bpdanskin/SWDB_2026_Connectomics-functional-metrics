@@ -818,6 +818,95 @@ correlation, its Figure 18 and its natural-movie responsiveness criterion), popu
 sparseness, running modulation index, and event SNR. The first three are all computable from
 arrays our metric functions already build and discard.
 
+## de Vries et al. 2019 — the Brain Observatory, and how much of it we can answer
+
+The Allen Brain Observatory paper (Nat Neuro 2019) is the methodological ancestor of most
+of V1DD: same institute, **same L0 event detection**, the same Vinje & Gallant sparseness,
+the same `(Rpref - Rnull)/(Rpref + Rnull)` index family, and the chi-square receptive-field
+test the V1DD white paper inherited. It is a different experiment, though, and two
+differences decide what is reachable.
+
+| | de Vries 2019 | V1DD |
+|---|---|---|
+| imaging rate | **30 Hz** | **~6 Hz** |
+| drifting gratings | 8 dir, **5 temporal frequencies**, 1 SF, **15 reps** | 12 dir, **2 spatial frequencies**, 1 TF, **8 reps** |
+| second grating | static gratings | windowed drifting gratings |
+| natural scenes | 118 images, **~50 reps** | 118 x 8, and 12 x 40 |
+| sessions | **3 per FOV**, ROI-matched (33.6 % matched) | **one**, all stimuli together |
+
+**The grating axes are transposed.** They vary temporal frequency at fixed SF; we vary
+spatial frequency at fixed 1 Hz. `preferred_temporal_frequency` — one of their headline
+pawplot metrics — is therefore **undefined in V1DD**, not merely hard. Their DG likewise
+cannot yield a preferred SF, which is why they take it from static gratings, a stimulus
+V1DD never ran.
+
+**One structural advantage is ours.** Every V1DD stimulus is in one session, so every ROI
+has every stimulus and no cross-session ROI matching is needed. Their bipartite-matching
+step, its two inclusion criteria and its robustness analysis all exist to work around a
+problem we do not have.
+
+### Their "reliability" is our `frac_responsive_trials`
+
+They define it as "the percentage of responsive trials to the cell's preferred stimulus
+condition". That is exactly our column, and their whole Fig. 6 response-class clustering is
+four of those numbers per cell — we ship five, in one session, without matching.
+
+**This collides with our own `reliability` column, which is something else**: mean pairwise
+between-trial *correlation*, from the V1DD white paper's Fig. 18. Same word, two
+quantities, both in this asset. Noted at `trial_responses.trial_reliability`.
+
+### A threshold that does not transfer
+
+Their responsiveness criterion is ">= 25 % of trials at the preferred condition significant
+at p < 0.05". Ours is 50 % for gratings. **The nominal fractions are not comparable**,
+because the same fraction is a different test at a different trial count:
+
+| criterion | trials | binomial false-positive rate |
+|---|---|---|
+| de Vries `>= 25 %` | 4 of 15 | 0.0055 |
+| ours at `>= 25 %` | 2 of 8 | 0.0572 — **10x looser** |
+| **ours at `>= 37.5 %`** | 3 of 8 | 0.0058 — **matched** |
+| ours at `>= 50 %` (default) | 4 of 8 | 0.00037 — 15x stricter |
+
+So **`frac_responsive_trials >= 0.375` is the like-for-like comparison**, not 0.25. On the
+2026-09-01 asset, drifting-gratings responsiveness is 74.0 % at 0.25 and 28.5 % at 0.50 —
+the spread is the threshold, not the biology. The arithmetic is recorded beside
+`dg_frac_thresh`.
+
+### What agrees, and what does not
+
+**Event magnitudes agree.** They report a median maximum evoked response of **0.006 AU**
+(DG-responsive) against 0.0004 AU spontaneous; our `pref_response` medians are **0.0074**
+(natural images), **0.0103** (natural movie), **0.0082** for responsive cells only. Same
+algorithm, same units, same order — the strongest cross-dataset agreement available, and it
+says event extraction behaves comparably despite the 5x rate difference.
+
+**Selectivity indices sit in their published range**: DG-full medians over responsive cells
+`dsi` 0.395, `osi` 0.635, `gosi` 0.293 (windowed 0.470 / 0.659 / 0.310).
+
+**Lifetime sparseness does not agree — ours 0.95, theirs 0.77** for natural scenes.
+Restricting to responsive cells moves ours by 0.0002, so it is not a selection effect. The
+likely cause is the sampling rate: a natural-scene response is **2 imaging samples** for us
+and **~7** for them, and with sparse events a 2-sample window is exactly zero far more
+often, which inflates sparseness mechanically. **Testable without a rerun once
+`condition_means` ships** — the fraction of the 118 images with exactly zero response per
+ROI should account for the gap.
+
+### Worth adding later, and what is not
+
+Ranked, all deferred until after the rerun: **running-speed correlation** per neuron (works
+in the 13 of 25 one-sided sessions where `run_mod_*` is NaN, and is arguably better on
+dF/F); **RF area** from a 2D Gaussian fit, which needs no rerun because `rf_maps` already
+carries the maps; a **binomial tail p-value** beside `frac_responsive_trials` so any
+threshold is recoverable; and **noise correlations** for the gratings, free from
+`tuning_curves` with no pipeline change.
+
+Not worth it: preferred temporal frequency (undefined), CCmax (their 0.25 s smoothing
+window is 1.5 samples at 6 Hz), and the decoding and Gabor-wavelet models, which belong in
+a notebook against the shipped arrays rather than in the metrics pipeline.
+
+---
+
 ## Methodology worth reusing
 
 **The two-seed control is the load-bearing idea.** Everything runs twice with different

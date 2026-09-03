@@ -476,6 +476,13 @@ def trial_reliability(ta: np.ndarray, min_conditions: int = 3) -> np.ndarray:
     responsiveness number we ship depends on a cut against a spontaneous null; this one
     asks only whether the cell does the same thing twice.
 
+    **Do not confuse this with de Vries et al. 2019's "reliability", which is a different
+    quantity with the same name.** Theirs is "the percentage of responsive trials to the
+    cell's preferred stimulus condition" — that is our `frac_responsive_trials`, and it is
+    what their Fig. 6 response-class clustering is built on. This column is a *correlation*
+    between repeats and carries no threshold at all. Both are in this asset; reaching for
+    the wrong one silently answers a different question.
+
     Three things it has to get right, all of which show up in real data:
 
     * **Pairwise-complete.** `trial_array` NaN-pads conditions presented fewer times than
