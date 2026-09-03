@@ -46,9 +46,22 @@ def sparseness(r, axis):
 # population sparseness, per image, within one population
 pop = sparseness(ni12_mean[roi_in_population], axis=0)   # -> (n_images,)
 
-# lifetime sparseness, per neuron -- reproduces the shipped column
+# lifetime sparseness, per neuron -- does NOT reproduce the shipped column
 life = sparseness(ni12_mean, axis=1)                     # -> (n_rois,)
 ```
+
+**That last line was wrong and is now corrected.** The shipped `lifetime_sparseness` is
+computed over **every individual trial response**, flattened across conditions and trials,
+not over the condition means -- see `trial_responses.lifetime_sparseness`, which says so.
+Measured on the 2026-09-03 asset: 118 images give 0.9507 shipped against 0.7373 over
+condition means (r = 0.55), and 12 images give 0.9486 against 0.4023 with **r = -0.005**.
+So for `ni12` the two are effectively unrelated.
+
+Two things follow. The condition-mean form is the one to quote against published values --
+it lands at 0.7373 against de Vries et al. 2019's 0.77, which the trial-flattened form
+does not. And sparseness is **not comparable across stimulus sets of different size**,
+because the `1 - 1/n` normaliser depends on `n`: the same neurons score 0.74 over 118
+images and 0.40 over 12.
 
 ## Three choices that change the answer
 

@@ -690,7 +690,38 @@ A caveat now visible: speedup 1 predicted ~3.6 h and delivered 4.83 h. The singl
 profile that said drifting gratings was 96 % of runtime over-weighted the fit relative to
 a full 25-session run. **Re-profile before promising a multiplier for speedup 2.**
 
-### 4. Smaller
+### 4. Two columns that need a run — both from the de Vries comparison
+
+Everything else that comparison suggested turned out to be computable from the shipped
+archives and now lives in the access notebook (see "Four of these are post-hoc; two need a
+fresh run"). These two cannot be, and should batch with whatever the next schema change is
+rather than justifying a run on their own.
+
+**a. Running correlation against the continuous trace** — a `roi_summary` column, Pearson
+correlation between running speed and each ROI's dF/F trace over the whole session. This is
+de Vries Fig. 5 (their excitatory median ≈ 0.03, Vip L2/3 ≈ 0.25). The asset ships no time
+series, so it cannot be done post-hoc; the trial-level version in the access notebook is
+192 grating trials, not the same quantity, and its median is −0.020.
+
+Two design notes settled in advance: compute it on **dF/F, not events** — a correlation has
+no denominator, so it does not inherit the sign-instability that made the run-modulation
+ratio events-only, and locomotion modulates on a timescale far slower than the 0.165 s
+frame. And it needs **no state split**, so unlike `run_mod_*` it is finite in every session,
+including the 2 of 25 where `run_mod_dgf` is all-NaN.
+
+**b. Trial counts for the natural-stimulus families** — enough to attach a binomial tail
+p-value to `ni`, `ni12` and `nm` `frac_responsive_trials`, as the access notebook already
+does for the two grating families. The gratings work only because `dg{w,f}_trials` is
+trial-level and NaN-padded, so the per-ROI denominator is exactly recoverable;
+`condition_means` is trial-averaged by design, so nothing in the asset carries the natural
+-stimulus denominators. The cheapest fix is a per-ROI `*_n_trials_at_pref` column rather
+than shipping another trial-level archive — natural movie alone would be 3,600 conditions
+× 9 repeats.
+
+Do **a** and **b** together: both are pure additions to existing tables, neither changes an
+existing column, and each on its own is far too small to justify a five-hour run.
+
+### 5. Smaller
 
 - `ssi_tuning_fit` has **no seed-to-seed noise floor** — `fit_tuning_curves` is skipped on
   seed B, so the most fit-dependent metric is the only one with no control.
@@ -884,26 +915,76 @@ says event extraction behaves comparably despite the 5x rate difference.
 **Selectivity indices sit in their published range**: DG-full medians over responsive cells
 `dsi` 0.395, `osi` 0.635, `gosi` 0.293 (windowed 0.470 / 0.659 / 0.310).
 
-**Lifetime sparseness does not agree — ours 0.95, theirs 0.77** for natural scenes.
-Restricting to responsive cells moves ours by 0.0002, so it is not a selection effect. The
-likely cause is the sampling rate: a natural-scene response is **2 imaging samples** for us
-and **~7** for them, and with sparse events a 2-sample window is exactly zero far more
-often, which inflates sparseness mechanically. **Testable without a rerun once
-`condition_means` ships** — the fraction of the 118 images with exactly zero response per
-ROI should account for the gap.
+**Lifetime sparseness agrees once you compute it their way — and the apparent
+disagreement was a definitional difference, not a biological or sampling one.** This was
+diagnosed wrongly before `condition_means` shipped, so the correction is worth stating in
+full.
 
-### Worth adding later, and what is not
+The shipped `ni_lifetime_sparseness` is computed over **every individual trial response**,
+flattened across conditions and trials — 118 images × 8 trials = 944 numbers per ROI.
+That is deliberate and documented at `trial_responses.lifetime_sparseness`. Vinje &
+Gallant, and de Vries after them, take it over the **mean response to each stimulus** —
+118 numbers per ROI. Trial-to-trial variance adds spread without adding mean, so the
+flattened form runs systematically higher.
 
-Ranked, all deferred until after the rerun: **running-speed correlation** per neuron (works
-in the 13 of 25 one-sided sessions where `run_mod_*` is NaN, and is arguably better on
-dF/F); **RF area** from a 2D Gaussian fit, which needs no rerun because `rf_maps` already
-carries the maps; a **binomial tail p-value** beside `frac_responsive_trials` so any
-threshold is recoverable; and **noise correlations** for the gratings, free from
-`tuning_curves` with no pipeline change.
+| | shipped (trial-flattened) | over condition means | de Vries |
+|---|---|---|---|
+| natural_images (118) | 0.9507 | **0.7373** | **0.77** |
+| natural_images_12 (12) | 0.9486 | 0.4023 | — |
 
-Not worth it: preferred temporal frequency (undefined), CCmax (their 0.25 s smoothing
-window is 1.5 samples at 6 Hz), and the decoding and Gabor-wavelet models, which belong in
-a notebook against the shipped arrays rather than in the metrics pipeline.
+So the numbers agree, to within a few percent, and the earlier diagnosis — that a
+2-imaging-sample response window inflates sparseness relative to their ~7 — is **not
+supported**. The fraction of images with an exactly zero response is high (median 0.63 per
+ROI) but correlates with sparseness at only r = 0.27, nowhere near enough to carry the
+gap the convention explains entirely.
+
+Two consequences that outlive the comparison:
+
+* **Sparseness is not comparable across stimulus sets of different size.** The `1 − 1/n`
+  normaliser depends on `n`, so the same neurons score 0.74 over 118 images and 0.40 over
+  12. Never put `ni_lifetime_sparseness` and `ni12_lifetime_sparseness` on the same axis.
+* **For `natural_images_12` the shipped column is close to uninformative about image
+  selectivity** — it correlates with the condition-mean version at **r = −0.005**. At 12
+  images the flattened form is dominated by trial noise. Use `ni12_mean` instead.
+
+The recipe is in the access notebook under "Post-hoc analyses from the shipped archives".
+
+### Four of these are post-hoc; two need a fresh run
+
+Re-checked against the complete 2026-09-03 15:55 asset. The archives turned out to carry
+more than expected — in particular `tuning_curves` ships `dg{w,f}_running`, the mean
+running speed on every grating trial — so most of what was deferred needs no rerun at all.
+All four are implemented in the access notebook.
+
+| | source | status |
+|---|---|---|
+| **Binomial tail p-value** for responsiveness | `dg{w,f}_trials` + `preferred_dir`/`preferred_sf` | **post-hoc.** The per-ROI denominator is exactly recoverable — `frac × n` is an integer for **100 %** of 38,369 ROIs, residual 0.0, with n ∈ {5,6,7,8}. Gratings only. |
+| **Noise correlations** | `dg{w,f}_trials` | **post-hoc.** 6.88 M within-plane pairs, median **+0.095**. 13 of 150 planes have under 50 ROIs and are skipped. |
+| **Running correlation**, trial level | `dg{w,f}_running` | **post-hoc**, but a coarser cousin of theirs — 192 trial points, gratings only, against their continuous trace. Median **−0.020**. |
+| **RF area** | `rf_maps` | **post-hoc, and mostly a negative result** — see below. |
+| Running correlation against the **continuous** dF/F trace | — | **needs a run.** No time series ships in the asset. |
+| Binomial p for **natural images / movie** | — | **needs a run.** `condition_means` is trial-averaged, so per-ROI trial counts at the preferred image are not recoverable. |
+
+**RF area deserves its own warning.** The reconstruction is sound — thresholding `rf_maps`
+at `rf_frac_thresh` reproduces the shipped `has_rf_on`/`has_rf_off` for 100 % of ROIs — but
+the fit needs the **largest connected component** first, as de Vries fit subregions rather
+than whole maps. Taking moments of the whole thresholded map gives an equivalent radius of
+38°, wider than the monitor, because scattered pixels dominate the second moment. With
+components: of 7,068 ON fields, 3,491 are a single pixel and **6,706 (95 %) are
+fragmented**; only **316 ROIs — 0.8 % of the population** — have a compact component of ≥6
+pixels. That is the 9.3° grid, not the fitting method. V1DD never ran the 4.65° sparse
+noise that de Vries had available.
+
+**A coverage figure quoted earlier was wrong.** `run_mod_*` is not NaN in 13 of 25
+sessions. On this asset `run_mod_dgf` is all-NaN in **2 of 25** and `run_mod_dgw` in **4 of
+25**, with session-median `run_frac` spanning 0.040–0.694. The running correlation is still
+worth having — it needs no state split — but the coverage gap it was meant to fill is much
+smaller than claimed.
+
+Not worth it: preferred temporal frequency (undefined — the grating axes are transposed),
+CCmax (their 0.25 s smoothing window is 1.5 samples at 6 Hz), and the decoding and
+Gabor-wavelet models, which belong in a notebook against the shipped arrays rather than in
+the metrics pipeline.
 
 ---
 
