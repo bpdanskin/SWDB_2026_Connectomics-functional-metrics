@@ -11,7 +11,9 @@ and exits non-zero if anything failed, so `run_all.py` and CI can both use the e
 
 **Skipping is not failing.** Most of these tests build synthetic data and need nothing
 mounted, but a few check the real reference tables. Those raise `SkipTest` and exit 2, so
-a laptop run reports them as skipped rather than drowning the real signal in red.
+a laptop run reports them as skipped rather than drowning the real signal in red. At two
+granularities: `SkipTest` skips a whole file, `skip()` skips a single check in a file whose
+other checks still apply.
 """
 
 import importlib.util
@@ -20,7 +22,8 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, List
 
-__all__ = ["REPO", "SkipTest", "check", "fails", "load", "require_dataset", "summary"]
+__all__ = ["REPO", "SkipTest", "check", "fails", "load", "require_dataset", "skip",
+           "summary"]
 
 #: tests/ -> validation/ -> code/ -> repo root
 REPO = Path(__file__).resolve().parents[3]
@@ -71,6 +74,23 @@ def check(name: str, condition: Any, detail: str = "") -> bool:
     if not ok:
         fails.append(name)
     return ok
+
+
+def skip(name: str, reason: str) -> bool:
+    """Record one assertion as not applicable here. Prints, counts as neither pass nor fail.
+
+    `SkipTest` skips a whole *file*, which is right when nothing in it can run without a
+    mounted dataset and wrong when one check out of fourteen is inapplicable. That was the
+    `test_entrypoint.py` case: two checks assert the git fallback works, which it cannot in
+    a capsule -- the one environment `SWDB_CODE_VERSION` exists to serve. Reported as
+    failures they made the validation notebook print "unit tests failed" over a clean
+    asset, which is the same defect the file-level `SkipTest` fix was meant to end.
+
+    `run_all.py` counts the literal strings "  PASS  " and "  FAIL  ", so this prefix is
+    invisible to both tallies by construction.
+    """
+    print(f"  SKIP  {name}  ({reason})")
+    return False
 
 
 def load(module: str):

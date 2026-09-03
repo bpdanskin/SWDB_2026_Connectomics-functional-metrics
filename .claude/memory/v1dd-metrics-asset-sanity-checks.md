@@ -120,7 +120,9 @@ so there was **no fidelity comparison and no seed-to-seed floor**. Every agreeme
 on record still comes from the M1-M7 work. Attach the reference and set
 `VALIDATION_SESSIONS` next time.
 
-### The three new defects
+### The three new defects — all fixed 2026-09-03
+
+Fixed in code, **not yet exercised by a run.** The next asset is what proves them.
 
 1. **`ENV SWDB_CODE_VERSION = <sha>` in the Dockerfile is malformed.** Docker's legacy
    `ENV <key> <value>` form takes everything after the first space as the value, so the
@@ -129,10 +131,13 @@ on record still comes from the M1-M7 work. Attach the reference and set
    whitespace values but not malformed ones — **add a shape check (hex, 7-40 chars)**,
    since a version you cannot resolve is the thing the variable exists to prevent. The
    SHA is also hardcoded, so it needs bumping by hand on every code change.
+   **Done:** spaces dropped, shape check added (7-40 hex), and `test_entrypoint.py` now
+   parses the Dockerfile `ENV` line — no test read it before, which is how it got out.
 2. **`stimulus_metrics_provenance.json` ships `git_sha: null`** while `processing.json`
    beside it carries the version. `utils/provenance.git_sha()` shells out to git and never
    reads `SWDB_CODE_VERSION`; `metadata.py` does. Give both the same ladder — two sidecars
    in one asset disagreeing is worse than either answer alone.
+   **Done:** `git_sha()` reads the variable first, verbatim, then falls back to short-HEAD.
 3. **`test_entrypoint.py` fails 2 of 14 checks in the capsule** (`resolves from git here`,
    `looks like a full sha`). Those assert the git *fallback* works, in the one environment
    that has no `.git` — the environment the variable exists for. The validation notebook
@@ -140,13 +145,48 @@ on record still comes from the M1-M7 work. Attach the reference and set
    clean asset. **This is the same failure mode as the `SkipTest` defect of 2026-08-16,
    recurring in a test written to fix that class of problem.** Skip both when
    `git rev-parse` finds no repository.
+   **Done**, via a new per-check `harness.skip(name, reason)`. The deeper lesson:
+   `SkipTest` only skipped whole *files*, so when 2 checks out of 14 became inapplicable
+   there was no way to express it and they were left to fail. **A suite that can only skip
+   at one granularity reports inapplicable checks as failures at the other.**
 
-Suite now reports **15 passed, 1 skipped, 1 failed, 451 checks**.
+Suite as of 2026-09-03: **18 passed, 1 skipped, 0 failed** — **666 checks in a checkout,
+663 in the capsule** (3 skips). Verified in both shapes by running it against a copy of
+`code/` with no `.git`, which is the shape a reproducible run actually has. A ~5 % flake in
+`test_run_dirs.py` — two live `run_stamp()` calls 50 ms apart asserted equal, false across
+a second boundary — was made deterministic at the same time, since it produced the same
+false "unit tests failed" banner.
 
-## `differs_from_reference_config` is 4 entries from 2026-09-02
+## Aperture centres, measured across all 25 sessions (2026-09-03)
 
-`fit_all_sf` joined `rf_center_scale_bug`, `pref_cond_fillna` and `ni_response_frames`.
-**A run reporting 3 is now out of date, not clean.**
+The pre-pass run standalone: **23 measured, 2 inferred, 0 unfilled, no partial sessions.**
+
+**Only column 2 has any within-column spread.** Columns 1, 3, 4, 5 are exactly constant
+across their volumes — one distinct float each. Column 2 spans 0.2 deg in azimuth because
+volume 2 sits off the other three; elevation is constant in every column.
+
+Consequence for the imputation: **column 4 / volume 1 is filled from four donors that
+agree exactly** (a unanimous value), while column 2 / volume 5 is filled from four donors
+of which three agree, so the median lands on the modal value rather than a midpoint. That
+is exactly why `n_donors` and `spread_*` go into provenance — with two *disagreeing*
+donors a median would invent a position no session used, and nothing in the column itself
+would reveal it.
+
+## `differs_from_reference_config` is 5 entries from 2026-09-03
+
+`impute_dgw_center` joined `fit_all_sf`, `rf_center_scale_bug`, `pref_cond_fillna` and
+`ni_response_frames`. **A run reporting 3 or 4 is now out of date, not clean.**
+
+The five are not the same kind of thing, and a provenance file reads wrong if they are
+lumped together:
+
+- **corrections** — `rf_center_scale_bug`, `pref_cond_fillna`, `ni_response_frames`. The
+  original was wrong. These change published numbers.
+- **additions** — `impute_dgw_center`. The original computed nothing here, so there is no
+  defect being corrected; it fills `dgw_center_*` for 2,456 ROIs that were NaN and the
+  four `dgw_rf_*` columns derived from them. **No `ssi` column moves.**
+- **performance** — `fit_all_sf`. Changes no published column, but leaves half of the
+  exported `tuning_curves` `*_params` NaN, so it belongs in the block once those ship.
 
 It is a different kind of entry from the other three, and the distinction matters when
 reading the block. Those three are deliberate *corrections of defects* and each changes

@@ -74,7 +74,7 @@ code/
     V1DD Preflight.ipynb
     preflight.py  compare.py  schema_report.py  diff_runs.py  checkpoints.py
     probe_window_center.py   one-off: why two sessions record no aperture centre
-    tests/        18 files, 537 checks, no pytest — run_all.py + a check() harness
+    tests/        19 files, 666 checks, no pytest — run_all.py + a check() harness
 results/409828_V1DD_stimulus_metrics_2026-08-16_19-40-03/   the shipped asset
 ```
 
@@ -109,12 +109,15 @@ Needs numpy/pandas, so it will not run in a bare environment. In the capsule:
 python code/validation/tests/run_all.py
 ```
 
-As of 2026-09-02 this reports **537 checks** across 18 files. In the capsule expect
-`test_entrypoint.py` to fail 2 checks that assert a git fallback in an environment with no
-`.git` — a defect in the test, listed under Open work — and `test_metadata.py` to pass
-where it skips locally. `test_reference_tables.py` skips whenever the `data_frames` asset
-is not attached — **skip is not failure**, and `harness.py` installs a `sys.excepthook`
-so `SkipTest -> exit 2` holds even at module scope.
+As of 2026-09-03 this reports **666 checks** across 19 files in a checkout, and **663 in
+the capsule** — three checks in `test_entrypoint.py` cannot run without a git repository
+and now skip rather than fail. **Expect zero failures in both.** `test_reference_tables.py`
+skips whenever the `data_frames` asset is not attached.
+
+**Skip is not failure**, at two granularities: `harness.py` installs a `sys.excepthook` so
+a file-level `SkipTest -> exit 2` holds even at module scope, and `harness.skip(name,
+reason)` marks a single inapplicable check inside a file whose other checks still apply.
+Neither counts toward `run_all.py`'s pass or fail tally.
 
 ---
 
@@ -169,15 +172,37 @@ column and constant across that column's volumes:**
 | 4 | -15.4 | -16.4 |
 | 5 | +9.9 | -14.4 |
 
-Two things to know before using it:
+**Measured across all 25 sessions on 2026-09-03** (the aperture-centre pre-pass, not
+inferred from a sample). Per-column spread of the sessions that record a centre:
 
-- **Column 2 / volume 2 differs by 0.2 deg** from the rest of its column. Retargeting
-  jitter, not a different window, but do not assume exact equality within a column.
+| column | donors | azimuth spread | elevation spread | distinct azimuths |
+|---|---|---|---|---|
+| 1 | 5 | **0.0** | 0.0 | 1 |
+| 2 | 4 | **0.2** | 0.0 | 2 |
+| 3 | 5 | **0.0** | 0.0 | 1 |
+| 4 | 4 (volumes 2-5) | **0.0** | 0.0 | 1 |
+| 5 | 5 | **0.0** | 0.0 | 1 |
+
+Three things to know before using it:
+
+- **Only column 2 has any spread at all.** Columns 1, 3, 4 and 5 are *exactly* constant
+  across their volumes — one distinct value each, to the float. So "fixed per column" is
+  not an approximation for four of the five columns, and the earlier warning not to assume
+  equality within a column applies specifically to **column 2 / volume 2, which sits
+  0.2 deg off** the other three. Retargeting jitter, not a different window.
+- That makes the two fills unequal in strength. **Column 4 / volume 1 is filled from four
+  donors that agree exactly**, so its imputed centre is a unanimous value, not a
+  compromise. Column 2 / volume 5 is filled from four donors of which three agree, so the
+  median lands on the modal value rather than being pulled to a position no session used —
+  which is why `n_donors` and `spread_*` are in the provenance: with two disagreeing
+  donors a median would invent a midpoint, and the reader needs to be able to see that.
 - **Two sessions ship no centre at all** — column 2 / volume 5 (906 ROIs) and column 4 /
   volume 1 (1,550 ROIs). Both have complete SSI and DGW data, so the stimulus ran; only
-  the recorded position is missing. **2,456 ROIs therefore cannot be filtered for RF
-  containment.** Column 4 / volume 1 is also the 67 %-low-confidence session, which is
-  probably coincidence — the two problems have nothing mechanically in common.
+  the recorded position is missing. **2,456 ROIs therefore could not be filtered for RF
+  containment** until the imputation. Column 4 / volume 1 is also the
+  67 %-low-confidence session, which is probably coincidence — the two problems have
+  nothing mechanically in common. No session records one coordinate without the other
+  (`partial_sessions` is empty across all 25).
 
 **The diameter is 30 degrees (15 degree radius)** — from the V1DD white paper, not from the
 NWB, which records no size. The paper also gives the reason for the per-column position:
@@ -273,38 +298,65 @@ Three structural facts that differ from the old `allen_v1dd` client:
    columns explicitly.
 3. **Running speed is already differentiated**, cm/s, on its own ~59 Hz timebase.
 
-The asset is **mixed format**: 23 NWB-Zarr directories (`*.nwb.zarr`) and 2 plain HDF5
-files (`*.nwb`). Use `v1dd_nwb.find_sessions()`, never a bare glob — globbing one suffix
-drops the other silently, and the symptom is a shorter session list rather than an error.
+The asset was **mixed format** — 23 NWB-Zarr directories (`*.nwb.zarr`) and 2 plain HDF5
+files (`*.nwb`) — and **as of 2026-09-03 the mount is 25 Zarr and 0 HDF5.** Still use
+`v1dd_nwb.find_sessions()`, never a bare glob: globbing one suffix drops the other
+silently. But do not trust the old symptom description — the format change turned
+`find_sessions` itself into an infinite crawl (fixed; see
+[Still open](#still-open--dgw_center_inferred-now-unblocked)), so **the symptom can be a
+hang rather than a shorter list.** Re-check the format mix before relying on either count.
 
 ---
 
 ## Pending the next run
 
-### Before you launch — three things that will otherwise ship wrong
+### Before you launch — the checklist
 
-All three are the provenance defects from the 2026-09-01 run, still unfixed, and the first
-has since gone stale as well.
+The three provenance defects are **fixed** (detail below). What is left is four decisions
+and one manual step, none of which the code can make for you.
 
-1. **`environment/Dockerfile` line 9 is malformed *and* out of date:**
-   ```dockerfile
-   ENV SWDB_CODE_VERSION = 17cacea5a61c6b596324d6911a879b15f3ed98c4
-   ```
-   Docker's legacy `ENV <key> <value>` form takes everything after the first space as the
-   value, so the variable becomes `"= 17cacea..."` — which is what `processing.json`
-   recorded last time. And `17cacea` now predates every change in this section. Fix both:
-   ```dockerfile
-   ENV SWDB_CODE_VERSION=50122f51fd866eec15e478c17f8ab40f41fba222
-   ```
-   No spaces around the `=`.
-2. **`utils/provenance.git_sha()` still shells out to git and never reads
-   `SWDB_CODE_VERSION`**, so `stimulus_metrics_provenance.json` will again ship
-   `git_sha: null` while `processing.json` carries a version. Give it the same
-   env-var-first ladder `metadata.py` has.
-3. **`test_entrypoint.py` will fail 2 checks in the capsule** — `resolves from git here`
-   and `looks like a full sha` assert a git fallback in the one environment that has no
-   `.git`. The validation notebook then prints "unit tests failed" over a clean asset.
-   Make both skip when `git rev-parse` finds no repository.
+| | |
+|---|---|
+| **1. Bump the Dockerfile SHA** | Pinned to `0df1cf7228401b8024edf8378e985e801379f31a`, necessarily one commit behind whatever records this work. **Nothing derives it**, and a stale value makes the asset claim a commit it was not built from. `test_entrypoint.py` [7] checks the line's shape and that the commit exists — deliberately *not* that it equals HEAD, since that would be red on every commit and get turned off. |
+| **2. Attach `data_frames` and set `VALIDATION_SESSIONS`** | The 2026-09-01 run did **neither**, so no fidelity comparison and no seed-to-seed floor have run since the M1-M7 work. Every agreement number in this file is from that older validation. This is the largest open gap in the asset's evidence, and it is free to close — it costs a dataset attachment and one variable. |
+| **3. Decide `fit_all_sf`** | `False` (default) is ~2x faster and changes no published column, but leaves the unread SF's `dgw_params` / `dgf_params` **NaN by design, not by failed fit** in the exported `tuning_curves`. `True` roughly doubles the drifting-gratings time, which is ~96 % of the run. |
+| **4. Decide `impute_dgw_center`** | `True` (default) fills the two sessions' aperture centre from their column median — see [Still open](#still-open--dgw_center_inferred-now-unblocked). `False` reproduces the 2026-09-01 behaviour with those 2,456 ROIs NaN. |
+| **5. Know what `diff_runs.py` should say** | **Added columns, plus `dgw_center_azimuth` / `dgw_center_elevation` moving from NaN to a value for 2,456 ROIs.** That second part is the imputation and is expected. **Every `ssi` column must be unmoved** — the centre is metadata no index reads. Anything else moving means a config change, not a data change. |
+
+Budget an extra **~6 minutes** for the new aperture-centre pre-pass (~14 s per session,
+stimulus table only, no traces).
+
+---
+
+The three provenance defects are done and verified in both shapes — a checkout and a copy
+of `code/` with no `.git`. What changed:
+
+1. **`environment/Dockerfile`** now reads `ENV SWDB_CODE_VERSION=<sha>`, no spaces, with
+   the reason in a comment above it. The legacy `ENV <key> <value>` form took everything
+   after the first space as the value, which is how `"= 17cacea..."` shipped.
+2. **`utils/provenance.git_sha()`** reads `SWDB_CODE_VERSION` first, verbatim, then falls
+   back to short-`HEAD` as before. `stimulus_metrics_provenance.json` and
+   `processing.json` now carry the same string in a capsule instead of `null` beside a
+   version.
+3. **`test_entrypoint.py`** skips `resolves from git here` and `looks like a full sha`
+   when `git rev-parse` finds no repository, via a new per-check `harness.skip()` —
+   `SkipTest` skips a whole file, which is the wrong granularity for 2 checks out of 14.
+   A skipped check prints `SKIP` and counts as neither pass nor fail in `run_all.py`.
+
+And two additions the defects argued for:
+
+4. **`resolve_code_version()` now checks the shape** — 7-40 hex, so a short sha set by
+   hand still works. The old guard rejected empty and whitespace but not malformed, which
+   is exactly why the bad value passed. Its error message names the Docker `ENV` trap.
+5. **`test_entrypoint.py` reads the Dockerfile.** No test read it last time, which is how
+   the malformed line got out — the same failure class as the other two. It asserts the
+   `ENV` line is well-formed and pins a commit that exists (not that it equals HEAD, which
+   would be red on every commit).
+
+Test counts after this work: **666 checks in a checkout, 663 in the capsule** (3 skips),
+**0 failures in either**. `test_run_dirs.py` also lost a ~5 % flake that took two live
+`run_stamp()` calls 50 ms apart and asserted they matched — false whenever they straddled
+a second boundary, and it printed the same "unit tests failed" banner over a clean asset.
 
 ### What is new
 
@@ -319,6 +371,7 @@ Do them in **one rerun**, not several — each is a schema change and the run is
 |---|---|---|
 | `natural_images`, `natural_images_12`, `natural_movie` | `reliability`, `reliability_dff` | mean pairwise between-trial correlation. **No threshold, no bootstrap** — the only responsiveness measure here that does not depend on a cut against a spontaneous null |
 | `surround_supression_index` | `dgw_rf_distance_on/off`, `dgw_rf_overlap_on/off` | how much of each RF the grating aperture covered. **Reported, never used to filter** |
+| `surround_supression_index` | `dgw_center_inferred` | bool. True for the 2,456 ROIs whose aperture centre came from their column's median rather than from their own session |
 | **`roi_summary`** (new family) | `snr`, `signal_power`, `noise_power`, `run_frac`, `spont_run_frac`, `spont_rate`, `spont_rate_run`, `spont_rate_stat`, `run_mod_dgf`, `run_mod_dgw`, `run_mod_spont` | per-ROI measures not tied to any visual stimulus |
 
 `roi_summary` was briefly called `locomotion`; it was renamed once `snr` and `spont_rate`
@@ -357,52 +410,134 @@ below.
 
 ### What to expect from the run
 
-- **`differs_from_reference_config` is 4 entries, not 3.** `fit_all_sf` joined the three
-  corrections. A run reporting 3 is either out of date or was a completeness run.
+- **`differs_from_reference_config` is 5 entries, not 4 and not 3.** Three kinds of thing
+  live in that set, and the distinction matters when reading a provenance file:
+  `rf_center_scale_bug` / `pref_cond_fillna` / `ni_response_frames` are **corrections** —
+  the original was wrong; `impute_dgw_center` is an **addition** — the original computed
+  nothing there, so there is no defect to correct; `fit_all_sf` is a **performance**
+  choice that changes no published column. A run reporting 3 or 4 is out of date.
 - `diff_runs.py` against 2026-09-01 should show **only added columns**, with the existing
-  ones unmoved. Receptive fields now run **first** in the per-plane loop so their maps
+  ones unmoved — **except `dgw_center_azimuth` / `dgw_center_elevation`, which change from
+  NaN to a value for 2,456 ROIs** (column 2 / volume 5 and column 4 / volume 1). That is
+  the imputation and it is expected. Every `ssi` column must be unmoved: the centre is
+  metadata that no index reads, which `test_drifting_gratings.py` [5b] asserts directly. Receptive fields now run **first** in the per-plane loop so their maps
   exist when surround suppression is assembled; that reorder is numerically free because
   `rng` is a factory returning a freshly seeded generator per family — but **confirm it
   with the diff rather than trusting it**.
 - The two new archives and `rf_maps` must all appear in `provenance.outputs.arrays`.
 
-### Still open
+### Still open — `dgw_center_inferred`, now unblocked
 
-**`dgw_center_inferred`** is *not* built, deliberately. Two sessions (column 2 / volume 5,
-column 4 / volume 1) record no aperture centre, and imputing from the column median is
-justified only if the data genuinely lacks it. Run first:
+**The probe has been run (2026-09-03) and the answer is (a): imputation is justified.**
+`probe_window_center.py` distinguished **(a)** the column is absent from the NWB stimulus
+table, **(b)** present but all NaN, or **(c)** values exist and our extraction loses them
+— only (a) and (b) justify filling in, because **(c) would be our bug** and filling would
+bury it.
 
-```bash
-python code/validation/probe_window_center.py
-```
+| session | verdict |
+|---|---|
+| column 4 / volume 1 | **(a)** `center_azimuth` and `center_elevation` **absent from the stimulus table entirely** |
+| column 2 / volume 5 | **(a)** same — both columns absent |
+| column 3 / volume 3 (control) | carries them: azimuth **1.8**, elevation **-9.7**, on all 192 rows |
 
-Read-only, seconds per session, writes `/scratch/window_center_probe.json`. It
-distinguishes: **(a)** the column is absent from the NWB stimulus table, **(b)** present
-but all NaN, or **(c)** values exist and `stimulus_trials` loses them. Only (a) and (b)
-justify imputation; **(c) is our bug**, and filling in would bury it. Column 3 / volume 3
-is the control — re-filtered the same day as column 4 / volume 1, yet it *does* carry a
-centre.
+Two things the probe settled beyond the verdict:
 
-If (a) or (b): fill from the column median — column 2 to azimuth -19.6 / elevation -10.0,
-column 4 to -15.4 / -16.4 — with a per-ROI `dgw_center_inferred` flag, and put the donor
-count and spread in provenance rather than in a column. Note column 2 / volume 2 sits
-0.2 deg off the rest of its column, so the position was re-entered per session rather than
-shared by construction; the median, not "the column's value", is the right fill.
+- **The columns are absent for `drifting_gratings_full` too**, not just windowed. So this
+  is not "the aperture position went unrecorded" but "the centre columns are missing from
+  those two sessions' stimulus tables" — an export-level omission, which is what makes it
+  cleanly (a). Nothing to recover; there is no value hiding anywhere in the file.
+- **The control's values match this file's per-column table exactly** (column 3 -> +1.8 /
+  -9.7), which is an independent check that the table is right.
+- Full-field records **0.0** in both centre columns where present — the `(0, 0)`
+  placeholder `stimulus_metrics` documents, confirmed rather than assumed.
+
+**Built 2026-09-03.** Fills from the median of the column's donors — column 2 to azimuth
+-19.6 / elevation -10.0, column 4 to -15.4 / -16.4 — with a per-ROI `dgw_center_inferred`
+flag, and the donor counts and spreads in provenance rather than in more columns. The
+median rather than "the column's value" because column 2 / volume 2 sits 0.2 deg off the
+rest of its column: the position was re-entered per session rather than shared by
+construction, so asserting equality would fail on real data.
+
+| piece | where |
+|---|---|
+| `sm.window_center(trials)` | the centre for one session, from **non-blank rows only** — shared by the pre-pass and `drifting_gratings_metrics`, so they cannot diverge |
+| `sm.infer_window_centers(observed, config=)` | the column medians, the flags, and the provenance block |
+| `MetricConfig.impute_dgw_center` | default `True`; `REFERENCE_CONFIG` `False` |
+| notebook cell 12 (new) | the pre-pass, ~14 s per session, ~6 min against a ~5 h run |
+| `surround_suppression_metrics(center=, center_inferred=)` | applies it per plane |
+
+**Why a pre-pass and not a post-pass:** filling from the column needs every session in
+that column, and the per-plane loop cannot know them when it reaches the first one. It
+also has to happen *before* the loop rather than as a fix-up on the assembled table,
+because `window_containment` is computed inside the loop from the centre — a post-pass
+would fill `dgw_center_*` and leave all four `dgw_rf_*` columns NaN for exactly the 2,456
+ROIs the exercise is for.
+
+**Verified against all 25 real sessions on 2026-09-03**, running the pre-pass standalone:
+`n_sessions 25, n_measured 23, n_inferred 2, n_unfilled 0`, `partial_sessions []`, and the
+two fills exactly the values above. So the numbers this will produce are observed, not
+predicted — unlike the rest of [Pending the next run](#pending-the-next-run). What has
+*not* run is the imputation inside a full pipeline pass, which is what the rerun proves.
+
+**A column with no donor is left NaN, not borrowed from another column.** The whole
+justification is that a column agrees with itself; across columns the positions genuinely
+differ. Provenance reports that as `n_donors: 0` and `n_unfilled`, so it reads as a gap
+rather than a success. Same for a session recording one coordinate and not the other: not
+a donor, and filled wholly from the donors rather than mixed with its own half.
+
+#### Three bugs found on the way to that answer — all fixed 2026-09-03
+
+The probe could not run, and neither could anything else that discovers sessions. All
+three are the house failure class: **a check running in a different shape than
+production.**
+
+1. **`find_sessions()` did not return at all on this mount.** It had per-format `or`
+   fallbacks:
+   ```python
+   zarr_paths = sorted(root.glob("*/*.nwb.zarr")) or sorted(root.rglob("*.nwb.zarr"))
+   hdf5_paths = sorted(root.glob("*/*.nwb"))      or sorted(root.rglob("*.nwb"))
+   ```
+   **The asset is now 25 Zarr and 0 HDF5, not the "23 + 2" recorded above.** So
+   `*/*.nwb` is legitimately empty, its `or` fires, and `rglob("*.nwb")` crawls 25 Zarr
+   chunk trees — over 30 s to yield five results and never finishing. **The symptom is a
+   hang, not the "shorter session list" this file warns about.** Fixed: the fallback fires
+   only when *neither* format is found shallowly, and it is now a pruned `os.walk`
+   (`_walk_sessions`) that never descends into a `.nwb.zarr`. Pruning is free — the old
+   code already discarded everything found inside a store. Discovery: **never -> 0.04 s
+   for 25 sessions.** Regression-tested in `test_find_sessions.py` [8] and [9], which
+   spy on `os.scandir` — the one hook both `rglob` and `os.walk` go through, so the
+   assertion is about the traversal rather than about which helper was called. **First
+   attempt at those tests passed against the buggy code**: they asserted `_walk_sessions`
+   and `os.walk` were not called, and the buggy version called neither, so both checks
+   were vacuous. Verified by reverting the fix and confirming they go red.
+2. **`probe_window_center.py` had never been executed.** It used
+   `with vn.open_session(path)`, but that returns `(nwbfile, io)`; the context manager is
+   `vn.session(path)`. It died on the first session with a `TypeError`. It now also reads
+   the table via `vn.load_stimulus_table`, the same call the pipeline makes.
+3. **The probe's own (c) test had a blind spot.** `stimulus_metrics` reads the centre from
+   `trials.loc[~is_blank]`, but the probe counted over *all* trials. A centre recorded
+   only on blank sweeps would have passed both its "present" counts while the asset still
+   showed NaN — clearing a bug of ours as an absence in the data, the one conclusion the
+   script exists to prevent. It now counts `n_non_nan_non_blank`, where the pipeline
+   looks, and reports that case as (c). (On the control, 192 raw vs 184 non-blank differs
+   by exactly the 8 blank sweeps, so blanks do carry the value here.)
 
 ---
 
 ## Open work
 
-### 1. Three provenance defects from the 2026-09-01 run — all still unfixed
+### 1. Three provenance defects from the 2026-09-01 run — FIXED 2026-09-03
 
-**Summarised as a pre-launch checklist under [Pending the next run](#pending-the-next-run);
-the detail and reasoning are here.**
+**What was done is under [Pending the next run](#pending-the-next-run); the reasoning that
+motivated each fix is kept here, because it is the reasoning and not the diff that
+generalises.**
 
-Every metric in this asset is fine. All three of these are *around* the numbers, and all
-three are the same failure class as last time: **a check that runs in a different shape
-than production.**
+Every metric in that asset is fine. All three were *around* the numbers, and all three
+were the same failure class as the run before: **a check that runs in a different shape
+than production.** Kept in the past tense below because that generalisation is the point,
+and the next defect of this class will not look like any of these three.
 
-**(a) The Dockerfile `ENV` line is malformed, and the bad value shipped.**
+**(a) The Dockerfile `ENV` line was malformed, and the bad value shipped.**
 
 ```dockerfile
 ENV SWDB_CODE_VERSION = 17cacea5a61c6b596324d6911a879b15f3ed98c4
@@ -416,29 +551,37 @@ included. `processing.json` in the shipped asset records exactly that:
 "version": "= 17cacea5a61c6b596324d6911a879b15f3ed98c4"
 ```
 
-Fix is to drop the spaces: `ENV SWDB_CODE_VERSION=17cacea5a61c6b596324d6911a879b15f3ed98c4`.
-The entry point's guard rejects *empty* and *whitespace* values but not a malformed one,
-so it passed. Worth adding a shape check — 40 hex characters, or 7-40 — since the whole
-point of the variable is that the recorded value be usable.
+**Fixed:** the spaces are gone. The entry point's guard rejected *empty* and *whitespace*
+values but not a malformed one, so it passed — `resolve_code_version()` now also requires
+7-40 hex, and `test_entrypoint.py` reads the Dockerfile line itself, which no test did
+before.
 
-Also note the SHA is **hardcoded in the Dockerfile**, so it must be bumped by hand every
-time the code changes or the asset will claim it was built from a stale commit. It was
-correct for this run only because the commit after it touched nothing but the Dockerfile.
+Still true, and unfixable in code: the SHA is **hardcoded in the Dockerfile** and must be
+bumped by hand every time the code changes, or the asset claims a commit it was not built
+from. It was correct for the 2026-09-01 run only because the commit after it touched
+nothing but the Dockerfile. The test asserts the pinned commit *exists* rather than that
+it is HEAD — equality would be red on every commit, so it would be turned off.
 
-**(b) `stimulus_metrics_provenance.json` ships `git_sha: null`** while `processing.json`
-in the same directory carries the version. `utils/provenance.git_sha()` shells out to git
-and never consults `SWDB_CODE_VERSION`, so in a capsule (no `.git`) it always returns
+**(b) `stimulus_metrics_provenance.json` shipped `git_sha: null`** while `processing.json`
+in the same directory carried the version. `utils/provenance.git_sha()` shelled out to git
+and never consulted `SWDB_CODE_VERSION`, so in a capsule (no `.git`) it always returned
 None. Two sidecars in one asset disagreeing about the same fact is worse than either
-answer alone. Give `git_sha()` the same env-var-first ladder `metadata.py` already has.
+answer alone. **Fixed:** `git_sha()` has the same env-var-first ladder `metadata.py` has,
+and a test asserts the two return the same string when git cannot answer.
 
-**(c) `test_entrypoint.py` fails 2 of 14 checks in the capsule** — `resolves from git
-here` and `looks like a full sha`. I wrote those, and they assert that the *git fallback*
-works, which it cannot in an environment with no `.git` — which is the exact environment
-the variable exists to serve. The consequence is not cosmetic: the validation notebook
-printed **"unit tests failed -- fix these before reading anything below"** over an
-otherwise-clean asset, which is precisely the defect (a skipped-or-inapplicable check
-reported as failure) that the previous run's `SkipTest` fix was meant to end. Make both
-checks skip when `git rev-parse` finds no repository.
+**(c) `test_entrypoint.py` failed 2 of 14 checks in the capsule** — `resolves from git
+here` and `looks like a full sha`. They assert that the *git fallback* works, which it
+cannot in an environment with no `.git` — the exact environment the variable exists to
+serve. The consequence was not cosmetic: the validation notebook printed **"unit tests
+failed -- fix these before reading anything below"** over an otherwise-clean asset, which
+is precisely the defect (a skipped-or-inapplicable check reported as failure) that the
+previous run's `SkipTest` fix was meant to end. **Fixed:** both skip when `git rev-parse`
+finds no repository, through a new per-check `harness.skip()`.
+
+The lesson that outlived the fix: `SkipTest` was built for whole files, so when 2 checks
+out of 14 became inapplicable there was no way to say so and they were left to fail. **A
+suite that can only skip at one granularity will report inapplicable checks as failures at
+the other**, and a suite that cries wolf gets ignored exactly when it is right.
 
 ### 2. Tune the response windows
 

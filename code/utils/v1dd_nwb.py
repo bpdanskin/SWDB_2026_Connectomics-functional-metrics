@@ -33,6 +33,7 @@ which tables exist, which columns, what is in them — is `validation/schema_rep
 because that is a question you ask about the data rather than of it.
 """
 
+import os
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -154,6 +155,30 @@ def session(path):
         io.close()
 
 
+def _walk_sessions(root: Path) -> Tuple[List[Path], List[Path]]:
+    """(zarr directories, hdf5 files) under `root`, from one walk that prunes Zarr stores.
+
+    `os.walk` rather than `rglob` because a `.nwb.zarr` store holds thousands of chunk
+    directories and `rglob` descends into every one of them. On a mounted asset that is
+    not slow but effectively unbounded: 25 stores took over 30 seconds to yield the first
+    five results and never finished, so the caller hung with no error and no output.
+
+    Pruning costs nothing correctness-wise: **nothing inside a Zarr store is ever a
+    session**, which the previous version acknowledged by filtering those matches out
+    again after paying to find them.
+    """
+    zarr_paths: List[Path] = []
+    hdf5_paths: List[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        # Collect the stores before pruning them -- a `.nwb.zarr` *is* a session, it is
+        # only its interior that is uninteresting.
+        zarr_paths.extend(here / d for d in dirnames if d.endswith(".nwb.zarr"))
+        dirnames[:] = [d for d in dirnames if not d.endswith(".nwb.zarr")]
+        hdf5_paths.extend(here / f for f in filenames if f.endswith(".nwb"))
+    return sorted(zarr_paths), sorted(hdf5_paths)
+
+
 def find_sessions(functional_dir, prefer: str = "zarr") -> List[Path]:
     """One NWB path per session directory, across both storage formats.
 
@@ -163,8 +188,14 @@ def find_sessions(functional_dir, prefer: str = "zarr") -> List[Path]:
 
     A session with both formats yields one path, `prefer` deciding which. Note that
     `*.nwb` does not match `*.nwb.zarr` (the name ends in `.zarr`), so the two patterns
-    do not overlap; the explicit filter below only guards against a stray `.nwb` file
-    *inside* a Zarr directory.
+    do not overlap.
+
+    The fallback fires only when the expected layout yields **nothing at all**. Per-format
+    `or` fallbacks looked equivalent and were not: on an asset that is uniformly one
+    format, the *other* format's shallow glob is legitimately empty, so its `or` fired and
+    started an unbounded crawl. That is what happened here once the mount became all-Zarr
+    — `find_sessions` stopped returning rather than returning a short list, and the caller
+    just hung. See `_walk_sessions` for why the crawl is fatal rather than slow.
     """
     root = Path(functional_dir)
     if not root.is_dir():
@@ -173,11 +204,10 @@ def find_sessions(functional_dir, prefer: str = "zarr") -> List[Path]:
             "data asset is attached; locally, set SWDB_DATA_ROOT."
         )
 
-    zarr_paths = sorted(root.glob("*/*.nwb.zarr")) or sorted(root.rglob("*.nwb.zarr"))
-    hdf5_paths = sorted(root.glob("*/*.nwb")) or sorted(root.rglob("*.nwb"))
-    hdf5_paths = [
-        p for p in hdf5_paths if not any(part.endswith(".nwb.zarr") for part in p.parts)
-    ]
+    zarr_paths = sorted(root.glob("*/*.nwb.zarr"))
+    hdf5_paths = sorted(root.glob("*/*.nwb"))
+    if not zarr_paths and not hdf5_paths:
+        zarr_paths, hdf5_paths = _walk_sessions(root)
 
     if prefer not in ("zarr", "hdf5"):
         raise ValueError("prefer must be 'zarr' or 'hdf5'")

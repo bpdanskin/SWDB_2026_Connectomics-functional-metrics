@@ -176,6 +176,52 @@ check("running and stationary variants both finite (4 trials each side)",
 check("ssi_tuning_fit finite for a well-fit ROI", np.isfinite(ssi.ssi_tuning_fit[0]),
       f"{ssi.ssi_tuning_fit[0]:.4f}")
 
+print("\n[5b] the aperture centre, measured and imputed")
+# The trial frame carries no centre columns at all -- the shape of the two sessions that
+# record none -- so `dgw.center` is (nan, nan) and the override is the only source.
+check("no centre columns in the table -> DGResult.center is NaN",
+      not np.isfinite(dgw.center[0]) and not np.isfinite(dgw.center[1]),
+      str(dgw.center))
+check("and the SSI frame reports NaN with no override",
+      bool(np.isnan(ssi.dgw_center_azimuth[0])), str(ssi.dgw_center_azimuth[0]))
+check("dgw_center_inferred defaults to False, not NaN",
+      ssi.dgw_center_inferred.dtype == bool and not ssi.dgw_center_inferred.any(),
+      str(ssi.dgw_center_inferred.dtype))
+
+# The positive path for the extraction that `window_center` replaced inline: a table that
+# DOES carry the columns must still be read the same way, on non-blank rows, first
+# distinct value. This is the refactor's regression check.
+_with_center = trials.copy()
+_with_center["center_azimuth"] = np.where(is_blank, np.nan, 1.8)
+_with_center["center_elevation"] = np.where(is_blank, np.nan, -9.7)
+dgw_c = sm.drifting_gratings_metrics(plane, _with_center, is_blank, spont, running,
+                                     dg_type="windowed", rng=np.random.default_rng(0))
+check("drifting_gratings_metrics reads a recorded centre",
+      dgw_c.center == (1.8, -9.7), str(dgw_c.center))
+check("and the refactor changed no metric",
+      dgw_c.metrics.drop(columns=[]).equals(dgw.metrics),
+      "same seed, same trials, only the centre columns added")
+
+imp = sm.surround_suppression_metrics(dgw, dgf, plane,
+                                      center=(-19.6, -10.0), center_inferred=True)
+check("an imputed centre reaches the frame",
+      (imp.dgw_center_azimuth[0], imp.dgw_center_elevation[0]) == (-19.6, -10.0),
+      f"{imp.dgw_center_azimuth[0]}, {imp.dgw_center_elevation[0]}")
+check("and every ROI in the plane is flagged", imp.dgw_center_inferred.all(),
+      str(imp.dgw_center_inferred.to_list()))
+check("no ssi column moves when only the centre is overridden",
+      all(np.allclose(imp[c].to_numpy(dtype=float), ssi[c].to_numpy(dtype=float),
+                      equal_nan=True) for c in sm.SSI_COLUMNS),
+      "the centre is metadata, not an input to any index")
+
+# A measured centre passed through explicitly must land identically, so the notebook can
+# route every session through the same argument rather than branching on missingness.
+meas = sm.surround_suppression_metrics(dgw, dgf, plane, center=(1.8, -9.7))
+check("a measured centre passed as the override lands unchanged",
+      (meas.dgw_center_azimuth[0], meas.dgw_center_elevation[0]) == (1.8, -9.7),
+      f"{meas.dgw_center_azimuth[0]}, {meas.dgw_center_elevation[0]}")
+check("and is not flagged inferred", not meas.dgw_center_inferred.any())
+
 print("\n[6] SSI edge cases on hand-built results")
 
 

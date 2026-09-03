@@ -12,6 +12,12 @@ rest of the column, establish which of these is true:
 (c) would make imputation a way of papering over our own bug, which is the reason to look
 before filling anything in.
 
+(c) has two shapes and both are counted separately, because the pipeline does not read
+every row it is handed: `stimulus_metrics` takes the centre from `trials.loc[~is_blank]`.
+So a centre recorded only on blank sweeps is present in the table, present in what
+`stimulus_trials` returns, and still NaN in the asset. Counting over all trials would call
+that healthy.
+
 The third session is the control. It was re-filtered on the same date as column 4 /
 volume 1 yet DOES carry a centre, so if re-filtering were the cause it should have lost
 one too.
@@ -53,8 +59,13 @@ SUSPECTS = {
 
 def describe(path):
     out = {"session": os.path.basename(os.path.dirname(str(path)))}
-    with vn.open_session(path) as nwb:
-        st = nwb.intervals["stimulus_table"].to_dataframe()
+    # `session`, not `open_session`: the latter returns `(nwbfile, io)` and is not a
+    # context manager, which is what this script did before -- it had never run.
+    # `load_stimulus_table` rather than a bare `to_dataframe()` so the probe reads the
+    # table through the same call the pipeline does; asking a differently-shaped question
+    # is the whole failure mode this script exists to rule out.
+    with vn.session(path) as nwb:
+        st = vn.load_stimulus_table(nwb)
         out["stimulus_table_columns"] = list(st.columns)
         for fam in ("drifting_gratings_windowed", "drifting_gratings_full"):
             raw = st[st["stim_name"] == fam]
@@ -69,9 +80,14 @@ def describe(path):
                 vals = pd.to_numeric(raw[c], errors="coerce")
                 via = (pd.to_numeric(trials[c], errors="coerce")
                        if c in trials.columns else pd.Series(dtype=float))
+                # `stimulus_metrics` reads the centre off `trials.loc[~is_blank]`, so a
+                # count over all trials can say "present" where the pipeline sees NaN --
+                # values landing only on blank sweeps. Count where the pipeline looks.
+                non_blank = via[~blank] if len(via) == len(blank) else pd.Series(dtype=float)
                 fam_out[c] = {
                     "n_non_nan_raw": int(vals.notna().sum()),
                     "n_non_nan_via_stimulus_trials": int(via.notna().sum()),
+                    "n_non_nan_non_blank": int(non_blank.notna().sum()),
                     "unique_raw": sorted(vals.dropna().unique().tolist())[:8],
                 }
             out[fam] = fam_out
@@ -87,7 +103,11 @@ def verdict(rec):
         return "(b) present but ALL NaN -- nothing recorded; imputation is justified"
     if az["n_non_nan_via_stimulus_trials"] == 0:
         return "(c) VALUES EXIST but stimulus_trials loses them -- OUR BUG, fix, do not impute"
-    return f"has {az['n_non_nan_raw']} values: {az['unique_raw']}"
+    if az["n_non_nan_non_blank"] == 0:
+        return ("(c) VALUES EXIST but only on BLANK sweeps, and the pipeline reads "
+                "trials.loc[~is_blank] -- OUR BUG, fix, do not impute")
+    return (f"has {az['n_non_nan_non_blank']} values where the pipeline reads "
+            f"({az['n_non_nan_raw']} raw): {az['unique_raw']}")
 
 
 if __name__ == "__main__":

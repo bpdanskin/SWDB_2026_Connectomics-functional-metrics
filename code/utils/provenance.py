@@ -95,7 +95,23 @@ def jsonable(obj: Any) -> Any:
 
 
 def git_sha(repo: Optional[str] = None) -> Optional[str]:
-    """Best-effort short commit hash; None outside a checkout (e.g. a capsule)."""
+    """The commit this code was built from, or None if nothing can say.
+
+    `SWDB_CODE_VERSION` is consulted first, and taken verbatim, for the same reason
+    `metadata.py` does it: a reproducible run copies `code/` without `.git`, so the git
+    fallback cannot answer in the one environment a published asset is built in. Without
+    the ladder this returned None there, and the 2026-09-01 asset shipped
+    `stimulus_metrics_provenance.json` with `git_sha: null` beside a `processing.json`
+    carrying a version. Two sidecars in one asset disagreeing about the same fact is worse
+    than either answer alone.
+
+    The git fallback stays short, which is what this field has always carried in a
+    checkout; the environment value is a full sha, so the two are prefix-compatible rather
+    than contradictory.
+    """
+    env = os.environ.get("SWDB_CODE_VERSION", "").strip()
+    if env:
+        return env
     try:
         out = subprocess.run(
             ["git", "-C", repo or os.getcwd(), "rev-parse", "--short", "HEAD"],

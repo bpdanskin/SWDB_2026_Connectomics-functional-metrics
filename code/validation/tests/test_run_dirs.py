@@ -7,7 +7,6 @@ hypothetical: it is exactly what happened to the P1 diff.
 import os
 import shutil
 import tempfile
-import time
 
 from harness import check, fails, load, summary
 
@@ -65,11 +64,20 @@ check("the other asset resolves on its own name",
       len(prov.list_runs(root, "some_other_asset")) == 1)
 
 print("\n[6] two runs in the same second do not collide by accident")
-a = prov.run_dir(root, NAME)
-time.sleep(0.05)
-b = prov.run_dir(root, NAME)
+# Times passed in rather than slept through. The sleeping version took two live stamps
+# 0.05 s apart and asserted they matched, which is false whenever those 50 ms straddle a
+# second boundary -- a ~5 % flake that prints "unit tests failed" over a clean asset,
+# which is the one thing this suite must never do. The property is about resolution, so
+# state the resolution: same second in, same stamp out.
+same_second = (1_700_000_000.10, 1_700_000_000.95)
 check("a stamp taken twice within a second is identical -- so take it once per run",
-      a == b, "documented behaviour, not a bug: the notebook binds RUN_STAMP once")
+      prov.run_stamp(same_second[0]) == prov.run_stamp(same_second[1]),
+      "documented behaviour, not a bug: the notebook binds RUN_STAMP once")
+check("and it is the second that separates them, not the sleep",
+      prov.run_stamp(1_700_000_000.95) != prov.run_stamp(1_700_000_001.05))
+check("run_dir carries that stamp into the path",
+      prov.run_dir(root, NAME, stamp=prov.run_stamp(same_second[0]))
+      == prov.run_dir(root, NAME, stamp=prov.run_stamp(same_second[1])))
 
 shutil.rmtree(root, ignore_errors=True)
 summary()

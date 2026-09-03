@@ -53,9 +53,13 @@ __all__ = [
     "roi_summary_metrics",
     "spectral_snr",
     "window_containment",
+    "window_center",
+    "infer_window_centers",
+    "WindowCenters",
     "DGResult",
     "SSI_COLUMNS",
     "CONTAINMENT_COLUMNS",
+    "BOOLEAN_COLUMNS",
     "ROI_SUMMARY_COLUMNS",
     "vonmises_two_peak",
     "vonmises_two_peak_fit",
@@ -70,9 +74,10 @@ __all__ = [
 class MetricConfig:
     """Knobs, defaulted to computing the right thing.
 
-    Three defaults differ from what reproduces the historical tables — `rf_center_scale_bug`,
-    `pref_cond_fillna` and `ni_response_frames` — and each is documented where it is
-    declared. `REFERENCE_CONFIG` is the historical set, so both behaviours are one
+    Four defaults differ from what reproduces the historical tables —
+    `rf_center_scale_bug`, `pref_cond_fillna`, `ni_response_frames` and
+    `impute_dgw_center` — and each is documented where it is declared. `fit_all_sf` also
+    differs, but it is a speed knob rather than a correction. `REFERENCE_CONFIG` is the historical set, so both behaviours are one
     argument away and which one you asked for is written down rather than inferred.
     """
 
@@ -177,6 +182,19 @@ class MetricConfig:
     #: this qualifies.
     fit_all_sf: bool = False
 
+    #: Fill a session's missing windowed-grating aperture centre from the median of the
+    #: other sessions in its cortical column, flagging the rows with
+    #: `dgw_center_inferred`. Two of 25 sessions record no centre, and
+    #: `probe_window_center.py` confirmed the columns are absent from their stimulus
+    #: tables rather than lost by us — see `infer_window_centers`.
+    #:
+    #: This changes `dgw_center_azimuth` / `dgw_center_elevation` from NaN to a value for
+    #: 2,456 ROIs, and therefore the four `dgw_rf_*` containment columns computed from
+    #: them. It does not touch any `ssi` column. `REFERENCE_CONFIG` sets it False, since
+    #: the original imputed nothing, so a run with it on shows in
+    #: `differs_from_reference_config`.
+    impute_dgw_center: bool = True
+
     # --- historical compatibility. These default to the CORRECTED behaviour; set both
     # True — or just use REFERENCE_CONFIG — to reproduce the historical tables exactly.
     #: `point_to_alt_azi` in the original divides the centre-to-centre *range* by `n`
@@ -213,6 +231,7 @@ REFERENCE_CONFIG = MetricConfig(
     ni_response_frames=None,       # fall back to the recovered time window
     ni_response_seconds=0.33,
     fit_all_sf=True,               # the original fitted every SF, not just the read one
+    impute_dgw_center=False,       # the original imputed no aperture centre
 )
 
 
@@ -235,7 +254,7 @@ OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
         "ssi", "ssi_avg", "ssi_avg_at_pref_sf", "ssi_running",
         "ssi_running_avg_at_pref_sf", "ssi_stationary",
         "ssi_stationary_avg_at_pref_sf", "ssi_tuning_fit",
-        "dgw_center_azimuth", "dgw_center_elevation",
+        "dgw_center_azimuth", "dgw_center_elevation", "dgw_center_inferred",
         "dgw_rf_distance_on", "dgw_rf_distance_off",
         "dgw_rf_overlap_on", "dgw_rf_overlap_off"],
     "roi_summary": [
@@ -311,6 +330,17 @@ def _roi_confidence(plane) -> np.ndarray:
     return pd.to_numeric(table["pika_roi_confidence"], errors="coerce").to_numpy(float)
 
 
+#: Columns published as real booleans. `to_output_schema` casts these with `astype(bool)`
+#: and **`bool(nan)` is `True`**, so `absent_frame` has to write False rather than leave
+#: NaN — otherwise a session that never saw the stimulus claims a receptive field, or an
+#: imputed aperture centre, for every one of its ROIs. Both functions read this one list
+#: so that a new boolean column cannot be added to one and forgotten in the other, which
+#: is precisely what happened when `dgw_center_inferred` was added and `absent_frame`
+#: still special-cased the `has_rf_` prefix.
+BOOLEAN_COLUMNS = frozenset({"has_rf_on", "has_rf_off", "has_rf_on_or_off",
+                             "dgw_center_inferred"})
+
+
 def to_output_schema(df: pd.DataFrame, family: str) -> pd.DataFrame:
     """Reorder and dtype a metrics frame to the asset's output schema.
 
@@ -331,7 +361,7 @@ def to_output_schema(df: pd.DataFrame, family: str) -> pd.DataFrame:
         out["pref_img"] = out["pref_img"].fillna(-1).astype(int)
     if "is_responsive" in out:                   # published writes float 0.0/1.0
         out["is_responsive"] = out["is_responsive"].astype(float)
-    for c in ("has_rf_on", "has_rf_off", "has_rf_on_or_off"):
+    for c in BOOLEAN_COLUMNS:
         if c in out:                             # published writes True/False
             out[c] = out[c].astype(bool)
     return out
@@ -373,14 +403,17 @@ def absent_frame(plane, family: str, mouse: Optional[str] = None) -> pd.DataFram
     as confident nonsense rather than as an absence.
 
     Booleans are set False rather than left NaN — `to_output_schema` casts them with
-    `astype(bool)`, and `bool(nan)` is **True**, which would report a receptive field for
-    every ROI in a session that never saw the stimulus.
+    `astype(bool)`, and `bool(nan)` is **True**, which would report a receptive field, or
+    an imputed aperture centre, for every ROI in a session that never saw the stimulus.
+    Which columns those are comes from `BOOLEAN_COLUMNS`, shared with `to_output_schema`;
+    it used to be a `has_rf_` prefix test here, and adding `dgw_center_inferred`
+    immediately broke it.
     """
     out = roi_frame(plane, mouse=mouse)
     for column in OUTPUT_COLUMNS[family]:
         if column in out:
             continue
-        out[column] = False if column.startswith("has_rf_") else np.nan
+        out[column] = False if column in BOOLEAN_COLUMNS else np.nan
     return out
 
 
@@ -510,6 +543,152 @@ def natural_movie_metrics(
     out["pref_response"] = pref_response
     out["z_score"] = z_score
     return out
+
+
+# ----------------------------------------------------- windowed-grating aperture
+
+
+def window_center(trials: pd.DataFrame) -> Tuple[float, float]:
+    """The `(azimuth, elevation)` of the grating aperture for one session, or `(nan, nan)`.
+
+    Pass the rows the metrics use — **non-blank sweeps only**. This is factored out of
+    `drifting_gratings_metrics` so that a pre-pass collecting centres across sessions and
+    the production read cannot diverge, which is not hypothetical: `probe_window_center.py`
+    counted these values over *all* trials while the pipeline reads only non-blank ones, so
+    a centre recorded on blank sweeps alone would have read as present and still shipped
+    NaN.
+
+    Takes the first distinct non-NaN value, which is what the historical code did. Not the
+    median or a uniqueness assertion: every session that records a centre records exactly
+    one, and a session that somehow recorded two should not have them silently averaged
+    into a position the stimulus never occupied. `infer_window_centers` reports
+    `n_distinct` so that case is visible rather than absorbed.
+    """
+    out = []
+    for col in ("center_azimuth", "center_elevation"):
+        vals = trials[col].dropna().unique() if col in trials.columns else []
+        out.append(float(vals[0]) if len(vals) else np.nan)
+    return out[0], out[1]
+
+
+@dataclass(frozen=True)
+class WindowCenters:
+    """Per-session aperture centres after imputation, plus what was done and why.
+
+    `centers` and `inferred` are keyed by `(column, volume)` with **volume as a string** —
+    volumes run 1-9 and a-f across this project, and an int key would not match.
+    """
+
+    centers: Dict[Tuple[int, str], Tuple[float, float]]
+    inferred: Dict[Tuple[int, str], bool]
+    provenance: Dict[str, Any]
+
+
+def infer_window_centers(
+    observed: Mapping[Tuple[int, str], Tuple[float, float]],
+    *,
+    config: MetricConfig = DEFAULT_CONFIG,
+) -> WindowCenters:
+    """Fill a session's missing aperture centre from the median of its cortical column.
+
+    Two of the 25 sessions (column 2 / volume 5 and column 4 / volume 1) do not record the
+    windowed-grating aperture position, leaving 2,456 ROIs that cannot be filtered for
+    receptive-field containment. `probe_window_center.py` established (2026-09-03) that
+    the `center_azimuth` / `center_elevation` columns are **absent from those sessions'
+    stimulus tables entirely** — not present-and-NaN, and not lost by our extraction — so
+    there is nothing in the file to recover and imputation is not covering for a bug of
+    ours. Run the probe again before trusting this on a different asset; had it returned
+    "values exist but we lose them", filling in would have buried that.
+
+    **The median of the donors, not "the column's value".** The position is fixed per
+    column by design — the window was placed on each column's population receptive field —
+    but column 2 / volume 2 sits 0.2 deg off the rest of its column, so it was re-entered
+    per session rather than shared by construction. A median tolerates that; asserting
+    equality would fail on real data.
+
+    Azimuth and elevation are imputed together and a session donates only if it has both.
+    Half a centre positions nothing, and mixing a measured azimuth with an inferred
+    elevation would make `dgw_center_inferred` unanswerable for that row.
+
+    A column with no donors is left NaN rather than filled from another column: the whole
+    justification is that the column's own sessions agree, and across columns they do not.
+    `provenance["columns"]` records that as `n_donors: 0`, so it reads as a gap rather than
+    as a success.
+    """
+    by_column: Dict[int, list] = {}
+    for key in observed:
+        by_column.setdefault(int(key[0]), []).append(key)
+
+    centers: Dict[Tuple[int, str], Tuple[float, float]] = {}
+    inferred: Dict[Tuple[int, str], bool] = {}
+    col_prov: Dict[str, Any] = {}
+    filled: list = []
+    partial: list = []
+
+    for col in sorted(by_column):
+        keys = sorted(by_column[col], key=lambda k: str(k[1]))
+        donors, missing = [], []
+        for k in keys:
+            az, el = observed[k]
+            az, el = float(az), float(el)
+            if np.isfinite(az) and np.isfinite(el):
+                donors.append((k, az, el))
+            else:
+                missing.append(k)
+                # One of the two present is neither a donor nor a clean absence; say so.
+                if np.isfinite(az) != np.isfinite(el):
+                    partial.append({"column": col, "volume": str(k[1]),
+                                    "azimuth": az if np.isfinite(az) else None,
+                                    "elevation": el if np.isfinite(el) else None})
+
+        az_vals = np.array([d[1] for d in donors], dtype=np.float64)
+        el_vals = np.array([d[2] for d in donors], dtype=np.float64)
+        med = ((float(np.median(az_vals)), float(np.median(el_vals)))
+               if len(donors) else (np.nan, np.nan))
+
+        for k, az, el in donors:
+            centers[k] = (az, el)
+            inferred[k] = False
+        for k in missing:
+            do_fill = bool(config.impute_dgw_center) and len(donors) > 0
+            centers[k] = med if do_fill else (np.nan, np.nan)
+            inferred[k] = do_fill
+            if do_fill:
+                filled.append({"column": col, "volume": str(k[1]),
+                               "azimuth": med[0], "elevation": med[1]})
+
+        col_prov[str(col)] = {
+            "n_donors": len(donors),
+            "donor_volumes": [str(d[0][1]) for d in donors],
+            "median_azimuth": med[0] if len(donors) else None,
+            "median_elevation": med[1] if len(donors) else None,
+            # Spread across donors, which is what says whether a median is meaningful.
+            # Column 2 shows 0.2 here; a column showing degrees would mean the
+            # fixed-per-column premise is wrong for it and the fill is not justified.
+            "spread_azimuth": float(np.ptp(az_vals)) if len(donors) else None,
+            "spread_elevation": float(np.ptp(el_vals)) if len(donors) else None,
+            "n_distinct_azimuth": int(len(np.unique(az_vals))) if len(donors) else 0,
+            "n_distinct_elevation": int(len(np.unique(el_vals))) if len(donors) else 0,
+            "missing_volumes": [str(k[1]) for k in missing],
+        }
+
+    prov = {
+        "enabled": bool(config.impute_dgw_center),
+        "n_sessions": len(observed),
+        # Three disjoint states, and they must sum to n_sessions: a session's centre was
+        # recorded, or it was filled from its column, or nothing could fill it. Counting
+        # "measured" as merely not-inferred lumps the third case into the first and
+        # reports a session that has no centre at all as one that has its own.
+        "n_measured": int(sum(1 for k, v in inferred.items()
+                              if not v and np.isfinite(centers[k][0]))),
+        "n_inferred": int(sum(1 for v in inferred.values() if v)),
+        "n_unfilled": int(sum(1 for k, v in inferred.items()
+                              if not v and not np.isfinite(centers[k][0]))),
+        "filled": filled,
+        "partial_sessions": partial,
+        "columns": col_prov,
+    }
+    return WindowCenters(centers=centers, inferred=inferred, provenance=prov)
 
 
 # --------------------------------------------------------------- drifting gratings
@@ -654,12 +833,7 @@ def drifting_gratings_metrics(
     grat = trials.loc[~is_blank]
 
     # per-session grating-aperture centre (NaN for full-field, which uses (0, 0) placeholders)
-    az_vals = grat["center_azimuth"].dropna().unique() if "center_azimuth" in grat.columns else []
-    el_vals = grat["center_elevation"].dropna().unique() if "center_elevation" in grat.columns else []
-    center: Tuple[float, float] = (
-        float(az_vals[0]) if len(az_vals) else np.nan,
-        float(el_vals[0]) if len(el_vals) else np.nan,
-    )
+    center: Tuple[float, float] = window_center(grat)
 
     dir_list = np.sort(grat["direction"].dropna().unique())
     sf_list = np.sort(grat["spatial_frequency"].dropna().unique())
@@ -836,6 +1010,8 @@ def surround_suppression_metrics(
     config: MetricConfig = DEFAULT_CONFIG,
     mouse: Optional[str] = None,
     containment: Optional[pd.DataFrame] = None,
+    center: Optional[Sequence[float]] = None,
+    center_inferred: bool = False,
 ) -> pd.DataFrame:
     """Eight surround-suppression indices, all of the form (W - F) / (W + F).
 
@@ -902,10 +1078,16 @@ def surround_suppression_metrics(
     frame = roi_frame(plane, mouse=mouse)
     for k, v in out.items():
         frame[k] = v
-    # grating-aperture centre carried through so consumers can filter by RF containment
-    az, el = dgw.center
+    # grating-aperture centre carried through so consumers can filter by RF containment.
+    # `center` overrides what this session recorded, which is how an imputed centre gets
+    # in; `dgw.center` stays the source of truth when nothing is passed, so the override
+    # cannot be applied by accident.
+    az, el = dgw.center if center is None else (float(center[0]), float(center[1]))
     frame["dgw_center_azimuth"] = np.full(n_rois, az)
     frame["dgw_center_elevation"] = np.full(n_rois, el)
+    # Per-ROI rather than in provenance alone: whoever filters on RF containment is
+    # reading a row, and a row imputed from its column median has to be able to say so.
+    frame["dgw_center_inferred"] = np.full(n_rois, bool(center_inferred), dtype=bool)
     for c in CONTAINMENT_COLUMNS:
         if containment is None:
             frame[c] = np.full(n_rois, np.nan)

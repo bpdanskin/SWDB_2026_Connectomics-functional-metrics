@@ -139,13 +139,18 @@ for fam in sorted(sm.OUTPUT_COLUMNS):
     ident = {"roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
              "pika_roi_confidence"}
     metrics = [c for c in out.columns if c not in ident]
+    # The trap: to_output_schema casts booleans with astype(bool), and bool(nan) is True,
+    # so leaving one NaN would claim a receptive field -- or an imputed aperture centre --
+    # for every ROI in a session that never saw the stimulus. Driven off
+    # sm.BOOLEAN_COLUMNS rather than a prefix or a hand-written list: the prefix version
+    # of this check passed while `dgw_center_inferred` was reporting True.
+    bools = [c for c in metrics if c in sm.BOOLEAN_COLUMNS]
+    if bools:
+        check(f"{fam}: {', '.join(bools)} are False, not True-from-NaN",
+              not out[bools].to_numpy().any(), str(bools))
+    metrics = [c for c in metrics if c not in bools]
     if fam == "rf_metrics":
-        # The trap: to_output_schema casts these with astype(bool), and bool(nan) is True,
-        # so leaving them NaN would claim a receptive field for every ROI.
-        check("rf: has_rf_* are False, not True-from-NaN",
-              not out[["has_rf_on", "has_rf_off", "has_rf_on_or_off"]].to_numpy().any())
-        rest = [c for c in metrics if not c.startswith("has_rf_")]
-        check("rf: centres are NaN", bool(out[rest].isna().all().all()))
+        check("rf: centres are NaN", bool(out[metrics].isna().all().all()))
     elif "pref_img" in metrics:
         # Keyed on the SCHEMA, not on a list of family names. Keyed on names this missed
         # natural_images, which shares this schema and was simply absent from the

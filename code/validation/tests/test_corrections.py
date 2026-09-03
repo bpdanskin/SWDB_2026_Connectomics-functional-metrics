@@ -34,12 +34,21 @@ differing = {f.name for f in dataclasses.fields(sm.MetricConfig)
              if getattr(d, f.name) != getattr(r, f.name)}
 check("reference fits every spatial frequency, as the original did",
       r.fit_all_sf is True and d.fit_all_sf is False)
-# Four, not three, since 2026-09-02. The first three are deliberate CORRECTIONS of
-# defects and change published numbers. `fit_all_sf` is a performance choice that changes
-# no published column — but it leaves half of the exported tuning_curves `*_params` NaN,
-# so once those arrays ship it belongs in the "what did this run do differently" block.
-check("exactly four settings differ", differing == {
-    "rf_center_scale_bug", "pref_cond_fillna", "ni_response_frames", "fit_all_sf"},
+check("reference imputes no aperture centre, as the original did",
+      r.impute_dgw_center is False and d.impute_dgw_center is True)
+# Five, not four, since 2026-09-03. Three kinds of difference live in this set and the
+# distinction is worth keeping straight when reading a provenance file:
+#   corrections   rf_center_scale_bug, pref_cond_fillna, ni_response_frames -- the
+#                 original was wrong, these change published numbers.
+#   additions     impute_dgw_center -- the original computed nothing here, so there is no
+#                 defect to correct; it fills dgw_center_* for 2,456 ROIs that were NaN,
+#                 and the four dgw_rf_* columns derived from them. No `ssi` column moves.
+#   performance   fit_all_sf -- changes no published column, but leaves half of the
+#                 exported tuning_curves `*_params` NaN, so it belongs here once those
+#                 arrays ship.
+check("exactly five settings differ", differing == {
+    "rf_center_scale_bug", "pref_cond_fillna", "ni_response_frames", "fit_all_sf",
+    "impute_dgw_center"},
     str(sorted(differing)))
 
 print("\n[1] receptive-field centres: corrected == historical * n/(n-1), exactly")

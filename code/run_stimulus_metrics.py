@@ -21,6 +21,7 @@ JupyterLab cannot accidentally produce something that looks like a captured asse
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,12 @@ INPUT_ASSET = Path(os.environ.get("SWDB_INPUT_ASSET", "/data/409828_V1DD_Filtere
 #: asset is not part of it -- but `metadata.py` reads it to record that checking happened.
 VALIDATION_DIR = Path(os.environ.get("SWDB_VALIDATION_DIR",
                                      "/scratch/v1dd_stimulus_metrics_validation"))
+
+#: What a usable code version looks like: a git object name, short or full. The point of
+#: `SWDB_CODE_VERSION` is that the value it stamps into the asset can be checked out
+#: again, so a value that cannot name a commit is not a version. Deliberately not a hard
+#: 40, because a short sha is a legitimate thing to set by hand.
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 PROCESSING_NB = CODE / "supplement" / "V1DD Stimulus Metrics.ipynb"
 VALIDATION_NB = CODE / "validation" / "V1DD Stimulus Metrics Validation.ipynb"
@@ -51,9 +58,31 @@ def resolve_code_version() -> str:
     checkout. There is no bypass flag on purpose: setting `SWDB_CODE_VERSION` to a value
     you choose is already the escape hatch, and it is an honest one — whatever you set is
     what the asset claims. A second "skip the check" switch would just restore `null`.
+
+    The value must still *look* like a commit (7-40 hex). Being set is not the same as
+    being usable: a malformed `ENV` line in the Dockerfile set it to `"= <sha>"`, which is
+    neither empty nor whitespace, so it passed the old guard and shipped.
     """
     env = os.environ.get("SWDB_CODE_VERSION", "").strip()
     if env:
+        if not _SHA_RE.match(env):
+            raise SystemExit(
+                f"\n!! refusing to start: SWDB_CODE_VERSION={env!r} is not a commit.\n"
+                "\n"
+                "   Expected 7-40 hex characters. This exact check exists because the\n"
+                "   2026-09-01 asset shipped processing.json with\n"
+                "\n"
+                '       "version": "= 17cacea5a61c6b596324d6911a879b15f3ed98c4"\n'
+                "\n"
+                "   Docker\'s legacy `ENV <key> <value>` form takes everything after the\n"
+                "   first space as the value, so\n"
+                "\n"
+                "       ENV SWDB_CODE_VERSION = <sha>      # wrong: value is '= <sha>'\n"
+                "       ENV SWDB_CODE_VERSION=<sha>        # right\n"
+                "\n"
+                "   The old guard rejected empty and whitespace but not malformed, so the\n"
+                "   bad value passed and the asset claims a version nothing can check out.\n"
+            )
         return env
     try:
         out = subprocess.run(["git", "-C", str(CODE.parent), "rev-parse", "HEAD"],

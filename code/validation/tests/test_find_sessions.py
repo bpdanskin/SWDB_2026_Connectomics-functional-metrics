@@ -1,7 +1,14 @@
 """Session discovery across both NWB storage formats.
 
-The bug being fixed: globbing only `*/*.nwb.zarr` silently drops sessions stored as plain
-HDF5 `.nwb`, and the symptom is a shorter session list rather than an error.
+The first bug fixed here: globbing only `*/*.nwb.zarr` silently drops sessions stored as
+plain HDF5 `.nwb`, and the symptom is a shorter session list rather than an error.
+
+The second (2026-09-03): the per-format `or` fallbacks meant that on an asset which is
+uniformly ONE format, the other format's shallow glob was legitimately empty, its `or`
+fired, and `rglob` crawled every Zarr chunk tree — so `find_sessions` never returned at
+all. **Every fixture in this file was mixed-format, so none of them could trigger it**,
+and the fixtures' Zarr "stores" are empty directories, so descending into one cost nothing
+here and was fatal on a real asset. Sections [8] and [9] cover both of those shapes.
 """
 
 from harness import check, fails, load, require_dataset, summary
@@ -103,6 +110,73 @@ check("still reports name and format",
       info["name"] == "h00" and info["format"] == "hdf5")
 check("identifiers are NaN, so the row is visibly incomplete",
       bool(np.isnan(info["column"])))
+
+# Both `Path.rglob` and `os.walk` reach the filesystem through `os.scandir`, so spying on
+# it observes the *traversal*, not the implementation. Asserting on which helper got called
+# would be vacuous: the version of this code that had the bug called neither.
+import os as _os
+
+
+def scan_spy():
+    """Context-manager-ish pair: (calls list, restore fn). Records every directory read."""
+    calls = []
+    real = _os.scandir
+
+    def spy(path="."):
+        calls.append(str(path))
+        return real(path)
+
+    _os.scandir = spy
+    return calls, (lambda: setattr(_os, "scandir", real))
+
+
+def zarr_interior(calls):
+    """Scandir calls that read a Zarr store or anything under it."""
+    return [c for c in calls if ".nwb.zarr" in c]
+
+
+print("\n[8] a uniformly single-format asset does not trigger a crawl")
+# The shape that hung: all Zarr and no HDF5, so the HDF5 shallow glob is legitimately
+# empty. Every other fixture here is mixed, which is why none of them could catch it.
+for label, zarrs, hdf5s in (("all Zarr", [f"z{i:02d}" for i in range(25)], []),
+                            ("all HDF5", [], [f"h{i:02d}" for i in range(4)])):
+    uniform = make_asset(zarrs, hdf5s)
+    # Give the stores an interior, so that descending into one is observable at all.
+    for n in zarrs:
+        (uniform / n / f"{n}.nwb.zarr" / "chunks" / "0").mkdir(parents=True)
+    calls, restore = scan_spy()
+    try:
+        got = vn.find_sessions(uniform)
+    finally:
+        restore()
+    check(f"{label}: finds every session", len(got) == len(zarrs) + len(hdf5s),
+          str(len(got)))
+    check(f"{label}: never reads the inside of a Zarr store",
+          not zarr_interior(calls), str(zarr_interior(calls)[:2]))
+
+print("\n[9] the fallback walk prunes Zarr stores instead of crawling them")
+# A real store holds thousands of chunk directories; the fixtures' are nearly empty, so
+# assert the traversal shape rather than hoping a slow fixture exposes it. Nothing inside
+# a store is ever a session, which the buggy version conceded by discarding whatever it
+# found in there after paying to find it.
+deep = TMP / "deep_layout"
+store = deep / "nested" / "s.nwb.zarr"
+(store / "chunks" / "0" / "0").mkdir(parents=True)
+(store / "chunks" / "decoy.nwb").write_bytes(b"\x89HDF\r\n\x1a\n")
+
+calls, restore = scan_spy()
+try:
+    got = vn.find_sessions(deep)
+finally:
+    restore()
+
+check("still finds the deeply nested session", len(got) == 1, str([p.name for p in got]))
+check("returns the store itself, not something inside it",
+      got[0].name.endswith(".nwb.zarr"), got[0].name)
+check("never reads the inside of the Zarr store",
+      not zarr_interior(calls), str(zarr_interior(calls)[:2]))
+check("the decoy inside the store is not a session",
+      not any("decoy" in str(p) for p in got))
 
 shutil.rmtree(TMP, ignore_errors=True)
 
