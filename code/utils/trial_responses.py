@@ -55,6 +55,7 @@ __all__ = [
     "trial_array",
     "frac_trials_above_null",
     "lifetime_sparseness",
+    "trial_reliability",
     "si_permutation_test",
 ]
 
@@ -460,3 +461,66 @@ def _nanmean_quiet(x: np.ndarray, axis: int) -> np.ndarray:
     total = np.where(finite, x, 0.0).sum(axis=axis)
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(n > 0, total / np.maximum(n, 1), np.nan)
+
+
+def trial_reliability(ta: np.ndarray, min_conditions: int = 3) -> np.ndarray:
+    """Mean pairwise between-trial correlation per ROI — response reliability.
+
+    `ta` is `(n_conditions, n_trials, n_rois)` from `trial_array`. For each ROI every
+    pair of trials is correlated across the condition axis and the correlations are
+    averaged, which is the definition in the V1DD white paper (Abbasi-Asl et al. 2019,
+    Figure 18). A cell that responds the same way to the same stimuli on every repeat
+    scores near 1; one whose responses are unrelated between repeats scores near 0.
+
+    Its value is that it needs **no threshold and no bootstrap**. Every other
+    responsiveness number we ship depends on a cut against a spontaneous null; this one
+    asks only whether the cell does the same thing twice.
+
+    Three things it has to get right, all of which show up in real data:
+
+    * **Pairwise-complete.** `trial_array` NaN-pads conditions presented fewer times than
+      the maximum, so a pair is scored on the conditions where *both* trials are finite,
+      not on a shared mask across all trials.
+    * **Zero-variance trials are skipped, not scored zero.** On deconvolved events a
+      trial's response vector is mostly exactly zero, and a flat vector has no defined
+      correlation. Counting those as 0.0 would report a reliable cell as unreliable;
+      they are excluded from the average, and an ROI with no usable pair gets NaN.
+    * **`min_conditions`** guards the same failure from the other side — a pair
+      overlapping on one or two conditions produces a correlation of +/-1 that means
+      nothing.
+
+    Returns `(n_rois,)`, NaN where no pair qualified.
+    """
+    ta = np.asarray(ta, dtype=np.float64)
+    if ta.ndim != 3:
+        raise ValueError(f"expected (n_conditions, n_trials, n_rois), got {ta.shape}")
+    n_cond, n_trials, n_rois = ta.shape
+    total = np.zeros(n_rois, dtype=np.float64)
+    count = np.zeros(n_rois, dtype=np.int64)
+
+    for i in range(n_trials):
+        a_all = ta[:, i, :]
+        for j in range(i + 1, n_trials):
+            b_all = ta[:, j, :]
+            both = np.isfinite(a_all) & np.isfinite(b_all)      # (n_cond, n_rois)
+            n = both.sum(axis=0)
+            ok = n >= min_conditions
+            if not ok.any():
+                continue
+            a = np.where(both, a_all, 0.0)
+            b = np.where(both, b_all, 0.0)
+            n_safe = np.maximum(n, 1)
+            ma, mb = a.sum(axis=0) / n_safe, b.sum(axis=0) / n_safe
+            da = np.where(both, a_all - ma, 0.0)
+            db = np.where(both, b_all - mb, 0.0)
+            va, vb = (da * da).sum(axis=0), (db * db).sum(axis=0)
+            # a flat trial has no correlation to give -- skip the pair for that ROI
+            usable = ok & (va > 0) & (vb > 0)
+            if not usable.any():
+                continue
+            with np.errstate(invalid="ignore", divide="ignore"):
+                r = (da * db).sum(axis=0) / np.sqrt(np.where(usable, va * vb, 1.0))
+            total += np.where(usable, r, 0.0)
+            count += usable
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(count > 0, total / np.maximum(count, 1), np.nan)

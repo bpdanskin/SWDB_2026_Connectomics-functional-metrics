@@ -203,7 +203,7 @@ OUTPUT_COLUMNS: Dict[str, Sequence[str]] = {
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "pika_roi_confidence",
         "frac_responsive_trials", "lifetime_sparseness", "pref_img", "pref_response",
-        "z_score"],
+        "z_score", "reliability", "reliability_dff"],
     "surround_supression_index": [
         "roi_unique_id", "mouse", "column", "volume", "plane", "roi", "depth_um",
         "pika_roi_confidence",
@@ -303,6 +303,32 @@ def to_output_schema(df: pd.DataFrame, family: str) -> pd.DataFrame:
         if c in out:                             # published writes True/False
             out[c] = out[c].astype(bool)
     return out
+
+
+def _reliability_on(plane, trace_key, starts, codes, *, n_trials, n_conditions,
+                    window=None, frames=None):
+    """`trial_reliability` recomputed on a second trace type, or NaN if it is absent.
+
+    Reliability is reported twice — once on the trace the family's metrics use (events)
+    and once on dF/F — because the two answer different questions and, on sparse events,
+    disagree substantially. Events are exactly zero most of the time, so a repeat's
+    response vector is mostly flat and its correlation with another repeat rests on a
+    handful of frames; dF/F carries a continuous signal and is what the white paper's
+    Figure 18 reports. Shipping both makes "how reproducible are the events every other
+    metric is built on?" a question the asset can answer.
+
+    Returns NaN for every ROI when `trace_key` is not loaded, so a plane loaded with a
+    single trace type still produces a valid frame rather than raising.
+    """
+    traces = plane.traces.get(trace_key)
+    if traces is None:
+        return np.full(plane.n_rois, np.nan)
+    if frames is not None:
+        sweeps = tr.sweep_responses_frames(traces, plane.timestamps, starts, int(frames))
+    else:
+        sweeps = tr.sweep_responses(traces, plane.timestamps, starts, window, None)
+    return tr.trial_reliability(
+        tr.trial_array(sweeps, codes, n_trials=n_trials, n_conditions=n_conditions))
 
 
 def absent_frame(plane, family: str, mouse: Optional[str] = None) -> pd.DataFrame:
@@ -444,6 +470,10 @@ def natural_movie_metrics(
     out = roi_frame(plane, mouse=mouse)
     out["frac_responsive_trials"] = frac_responsive
     out["lifetime_sparseness"] = _lifetime_sparseness_chunked(ta)
+    out["reliability"] = tr.trial_reliability(ta)
+    out["reliability_dff"] = _reliability_on(
+        plane, "dff", starts, frames, n_trials=n_repeats,
+        n_conditions=len(frame_ids), window=window)
     out["pref_img"] = pref_img
     out["pref_response"] = pref_response
     out["z_score"] = z_score
@@ -938,6 +968,10 @@ def natural_images_metrics(
     out = roi_frame(plane, mouse=mouse)
     out["frac_responsive_trials"] = frac
     out["lifetime_sparseness"] = _lifetime_sparseness_chunked(ta)
+    out["reliability"] = tr.trial_reliability(ta)
+    out["reliability_dff"] = _reliability_on(
+        plane, "dff", starts, code, n_trials=n_trials, n_conditions=len(image_ids),
+        window=window, frames=config.ni_response_frames)
     out["pref_img"] = pref_img
     out["pref_response"] = pref_response
     out["z_score"] = z_score

@@ -182,4 +182,75 @@ check("p values in [0, 1]", np.all((p >= 0) & (p <= 1)))
 check("tuned neuron has higher dsi than flat", si[0] > si[1], f"{si[0]:.3f} vs {si[1]:.3f}")
 check("tuned neuron is significant, flat is not", p[0] < 0.05 < p[1], f"p={p}")
 
+print("\n[N] trial_reliability: mean pairwise between-trial correlation")
+# (n_conditions, n_trials, n_rois). Every expectation below is analytic.
+base = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+# identical repeats -> perfectly reliable
+ta = np.stack([base, base, base], axis=1)[:, :, None]
+check("identical repeats -> reliability 1.0",
+      abs(float(tr.trial_reliability(ta)[0]) - 1.0) < 1e-12)
+
+# a repeat that is an affine transform of another is still perfectly correlated:
+# reliability is about the response PATTERN, not its gain
+ta = np.stack([base, 3 * base + 7], axis=1)[:, :, None]
+check("reliability is invariant to per-repeat gain and offset",
+      abs(float(tr.trial_reliability(ta)[0]) - 1.0) < 1e-12)
+
+# mirrored repeat -> perfectly anti-correlated
+ta = np.stack([base, base[::-1]], axis=1)[:, :, None]
+check("reversed repeat -> reliability -1.0",
+      abs(float(tr.trial_reliability(ta)[0]) + 1.0) < 1e-12)
+
+# three repeats, one identical and one reversed -> mean of {+1, -1, -1} = -1/3
+ta = np.stack([base, base, base[::-1]], axis=1)[:, :, None]
+check("averages over all pairs, not just adjacent ones",
+      abs(float(tr.trial_reliability(ta)[0]) - (-1.0 / 3.0)) < 1e-12,
+      f"{float(tr.trial_reliability(ta)[0]):.6f}")
+
+# independent noise -> near zero, and the sign should not be systematic
+rng_r = np.random.default_rng(7)
+ta = rng_r.normal(size=(400, 6, 40))
+rel = tr.trial_reliability(ta)
+check("independent noise -> reliability near 0", abs(float(np.mean(rel))) < 0.02,
+      f"mean {float(np.mean(rel)):+.4f}")
+
+# a flat repeat has no correlation to give: it must be SKIPPED, not scored 0.0.
+# On events most repeats are mostly zero, so this is the common case, not an edge case.
+ta = np.stack([base, base, np.zeros_like(base)], axis=1)[:, :, None]
+check("a zero-variance repeat is skipped, not counted as 0",
+      abs(float(tr.trial_reliability(ta)[0]) - 1.0) < 1e-12,
+      "the one usable pair is (0,1), which is perfect")
+ta = np.zeros((6, 3, 1))
+check("all repeats flat -> NaN, not 0", np.isnan(float(tr.trial_reliability(ta)[0])))
+
+# NaN padding is pairwise-complete: trial 2 exists for only two conditions, too few to
+# score, so it is dropped while the (0,1) pair still counts
+ta = np.full((6, 3, 1), np.nan)
+ta[:, 0, 0] = base
+ta[:, 1, 0] = base
+ta[:2, 2, 0] = [2.0, 1.0]          # reversed, so the short pair scores -1 when admitted
+check("pairs overlapping on fewer than min_conditions are dropped",
+      abs(float(tr.trial_reliability(ta, min_conditions=3)[0]) - 1.0) < 1e-12,
+      "only the (0,1) pair survives")
+check("lowering min_conditions admits it: mean of {+1, -1, -1} = -1/3",
+      abs(float(tr.trial_reliability(ta, min_conditions=2)[0]) - (-1.0 / 3.0)) < 1e-12,
+      f"{float(tr.trial_reliability(ta, min_conditions=2)[0]):.6f}")
+
+# ROIs are independent: a reliable and an unreliable cell in one array
+ta = np.zeros((6, 2, 2))
+ta[:, 0, 0] = base; ta[:, 1, 0] = base                 # roi 0: reliable
+ta[:, 0, 1] = base; ta[:, 1, 1] = base[::-1]           # roi 1: anti-correlated
+rel = tr.trial_reliability(ta)
+check("ROIs are scored independently",
+      abs(rel[0] - 1.0) < 1e-12 and abs(rel[1] + 1.0) < 1e-12, str(rel))
+
+check("a single repeat cannot have a reliability",
+      np.isnan(float(tr.trial_reliability(np.stack([base], axis=1)[:, :, None])[0])))
+try:
+    tr.trial_reliability(np.zeros((6, 3)))
+    check("raises on a non-3D array", False)
+except ValueError as e:
+    check("raises on a non-3D array", "n_conditions" in str(e))
+
 summary()

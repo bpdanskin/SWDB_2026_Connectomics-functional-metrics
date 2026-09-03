@@ -109,4 +109,48 @@ got = sm._lifetime_sparseness_chunked(ta, block=7)
 check("chunked == reference", np.allclose(ref,got,equal_nan=True),
       f"max diff {np.nanmax(np.abs(ref-got)):.2e}")
 
+print("\n[5] reliability: reported on both trace types")
+# The plane above carries only events, which is the degrade path: reliability_dff must be
+# NaN rather than raising, so a single-trace plane still yields a valid frame.
+check("reliability computed on the events trace",
+      np.isfinite(out["reliability"]).any(),
+      f"{int(np.isfinite(out['reliability']).sum())} of {N_ROIS} ROIs finite")
+check("reliability_dff is all-NaN when dff was not loaded",
+      bool(out["reliability_dff"].isna().all()))
+
+# Now with dF/F present. Build it as a smoothed, always-positive version of the same
+# events so the two traces describe the same cell -- then dF/F reliability should exceed
+# events reliability, because events are exactly zero on most frames and a mostly-flat
+# repeat carries almost no pattern to correlate.
+kernel = np.exp(-np.arange(12) / 3.0)
+dff = np.stack([np.convolve(traces[:, r], kernel, mode="same") + 0.05
+                for r in range(N_ROIS)], axis=1)
+plane_both = vn.PlaneData(
+    mouse_id="409828", depth_um=150.0, column=1, volume="3", plane=0,
+    roi=np.arange(N_ROIS) * 3, is_valid=np.ones(N_ROIS, bool), timestamps=ts,
+    traces={"events": traces, "dff": dff}, roi_table=roi_table, dt=DT)
+both = sm.natural_movie_metrics(plane_both, trials, (spont_start, spont_stop),
+                                rng=np.random.default_rng(0))
+check("reliability_dff is populated when dff is loaded",
+      np.isfinite(both["reliability_dff"]).any(),
+      f"{int(np.isfinite(both['reliability_dff']).sum())} of {N_ROIS} ROIs finite")
+check("adding a dff trace does not disturb the events reliability",
+      np.allclose(out["reliability"], both["reliability"], equal_nan=True))
+check("adding a dff trace does not disturb any other column",
+      all(np.allclose(out[c], both[c], equal_nan=True)
+          for c in ("frac_responsive_trials", "lifetime_sparseness", "pref_img",
+                    "pref_response", "z_score")))
+resp = np.isfinite(both["reliability"]) & np.isfinite(both["reliability_dff"])
+# The two must actually be different numbers -- that is what says they were computed from
+# different traces rather than the same one twice. Which is *larger* is deliberately not
+# asserted: that is an empirical question about the data, and a unit test on synthetic
+# traces cannot answer it. (On this fixture events score higher, because the synthetic
+# dF/F is a convolution that smears each response across neighbouring movie frames and so
+# blurs the very frame-indexed pattern reliability measures. Nothing follows from that
+# about real recordings.)
+check("the two reliabilities are genuinely different numbers",
+      not np.allclose(both.loc[resp, "reliability"], both.loc[resp, "reliability_dff"]),
+      f"dff median {both.loc[resp, 'reliability_dff'].median():+.3f} vs "
+      f"events median {both.loc[resp, 'reliability'].median():+.3f}")
+
 summary()
