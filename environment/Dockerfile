@@ -11,7 +11,7 @@ COPY git-ask-pass /
 # "= 17cacea..." and the 2026-09-01 asset shipped that string as its version.
 # Bump by hand whenever code/ changes -- nothing derives this, and a stale value
 # makes the asset claim it was built from a commit it was not.
-ENV SWDB_CODE_VERSION=0df1cf7228401b8024edf8378e985e801379f31a
+ENV SWDB_CODE_VERSION=eea6957cb014edf4c5efd5f122e012a8af97082e
 
 COPY pyproject.toml /tmp/pyproject.toml
 RUN uv pip install --system --no-cache -r /tmp/pyproject.toml
