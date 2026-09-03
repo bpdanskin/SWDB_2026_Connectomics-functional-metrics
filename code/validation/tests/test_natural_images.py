@@ -66,7 +66,7 @@ cfg = sm.MetricConfig(ni_response_seconds=WINDOW, ni_response_frames=None,
 
 print("[1] natural_images_metrics")
 out = sm.natural_images_metrics(plane, trials, (spont_start, spont_stop),
-                                config=cfg, rng=np.random.default_rng(0))
+                                config=cfg, rng=np.random.default_rng(0))[0]
 check("one row per ROI", len(out) == N_ROIS)
 check("has the published metric columns",
       {"frac_responsive_trials", "lifetime_sparseness", "pref_img", "pref_response",
@@ -97,7 +97,7 @@ print("\n[3] z_score and determinism")
 check("driven ROI has the largest z_score", int(np.nanargmax(out.z_score)) == 0,
       str(np.round(out.z_score.to_numpy(), 2)))
 again = sm.natural_images_metrics(plane, trials, (spont_start, spont_stop),
-                                  config=cfg, rng=np.random.default_rng(0))
+                                  config=cfg, rng=np.random.default_rng(0))[0]
 det = ["lifetime_sparseness", "pref_img", "pref_response"]
 check("deterministic columns are seed-independent",
       all(np.allclose(out[c].to_numpy(float), again[c].to_numpy(float), equal_nan=True)
@@ -105,7 +105,7 @@ check("deterministic columns are seed-independent",
 check("same seed reproduces z_score exactly",
       np.allclose(out.z_score.to_numpy(), again.z_score.to_numpy(), equal_nan=True))
 other = sm.natural_images_metrics(plane, trials, (spont_start, spont_stop),
-                                  config=cfg, rng=np.random.default_rng(1))
+                                  config=cfg, rng=np.random.default_rng(1))[0]
 check("z_score moves with the seed", not np.allclose(out.z_score.to_numpy(),
                                                      other.z_score.to_numpy(), equal_nan=True))
 check("but pref_img does not", np.array_equal(out.pref_img, other.pref_img))
@@ -115,7 +115,7 @@ short = sm.natural_images_metrics(
     plane, trials, (spont_start, spont_stop),
     config=sm.MetricConfig(ni_response_seconds=0.25, ni_response_frames=None,
                            other_n_boot=2000),
-    rng=np.random.default_rng(0))
+    rng=np.random.default_rng(0))[0]
 # A flat within-sweep response is window-invariant, so the probe can only discriminate
 # where the trace has structure inside the window -- which sparse events do.
 check("flat-response ROI is window-invariant (why a flat fixture cannot probe)",
@@ -137,7 +137,7 @@ wide = sm.natural_images_metrics(
     plane, trials, (spont_start, spont_stop),
     config=sm.MetricConfig(ni_response_seconds=0.40, ni_response_frames=None,
                            other_n_boot=2000),
-    rng=np.random.default_rng(0))
+    rng=np.random.default_rng(0))[0]
 check("a well-separated window changes the sparse-event ROI's response",
       abs(out.pref_response[4] - wide.pref_response[4]) > 1e-6,
       f"{out.pref_response[4]:.5f} at 0.30 s vs {wide.pref_response[4]:.5f} at 0.40 s")
@@ -147,7 +147,7 @@ same = [sm.natural_images_metrics(
             plane, trials, (spont_start, spont_stop),
             config=sm.MetricConfig(ni_response_frames=2, ni_response_seconds=w,
                                    other_n_boot=2000),
-            rng=np.random.default_rng(0)).pref_response.to_numpy()
+            rng=np.random.default_rng(0))[0].pref_response.to_numpy()
         for w in (0.10, 9.99)]
 check("ni_response_seconds has no effect once frames is set",
       np.array_equal(same[0], same[1], equal_nan=True),
@@ -155,7 +155,7 @@ check("ni_response_seconds has no effect once frames is set",
 three = sm.natural_images_metrics(
     plane, trials, (spont_start, spont_stop),
     config=sm.MetricConfig(ni_response_frames=3, other_n_boot=2000),
-    rng=np.random.default_rng(0)).pref_response.to_numpy()
+    rng=np.random.default_rng(0))[0].pref_response.to_numpy()
 check("but the frame count does", not np.array_equal(same[0], three, equal_nan=True))
 
 print("\n[5] guardrails and schema")
@@ -163,7 +163,7 @@ bad = trials.copy()
 bad.loc[0, "image_index"] = np.nan
 try:
     sm.natural_images_metrics(plane, bad, (spont_start, spont_stop), config=cfg,
-                              rng=np.random.default_rng(0))
+                              rng=np.random.default_rng(0))[0]
     check("raises on NaN image_index", False)
 except ValueError as e:
     check("raises on NaN image_index", "NaN image_index" in str(e))

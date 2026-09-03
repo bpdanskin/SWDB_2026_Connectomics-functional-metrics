@@ -152,4 +152,96 @@ refuses("a plane with a different TRIAL count is refused",
 refuses("running speeds out of step with plane keys are refused", drop_plane_key=True)
 refuses("an ROI-axis length that disagrees with the table is refused", short_roi_key=True)
 
+
+print("\n[3] the condition-means writer cell")
+cond = [i for i, c in enumerate(cells)
+        if c["cell_type"] == "code" and "condition_means_" in "".join(c["source"])
+        and "savez" in "".join(c["source"])]
+check("exactly one cell writes the condition-means archive", len(cond) == 1, str(cond))
+CSRC = "".join(cells[cond[0]]["source"])
+N_IMG, N_IMG12 = 118, 12
+
+
+def cmake(widths=None, ids_short=False, short_roi_key=False):
+    rng = np.random.default_rng(1)
+    widths = widths or [N_IMG] * N_PLANES
+    means = {"natural_images": [], "natural_images_12": []}
+    ids = {"natural_images": np.arange(N_IMG),
+           "natural_images_12": np.arange(N_IMG12) * 3}     # sparse subset, as in reality
+    if ids_short:
+        ids["natural_images"] = np.arange(N_IMG - 1)
+    keys = []
+    for p in range(N_PLANES):
+        keys += [f"M409828_1_3_{p}_{r}" for r in range(N_ROIS_PER)]
+        means["natural_images"].append(
+            rng.normal(size=(N_ROIS_PER, widths[p])).astype(np.float32))
+        means["natural_images_12"].append(
+            rng.normal(size=(N_ROIS_PER, N_IMG12)).astype(np.float32))
+    if short_roi_key:
+        keys = keys[:-1]        # table shorter than the matrix, which must be refused
+    return means, ids, keys
+
+
+def crun(means, ids, keys, tmp):
+    ns = {"np": np, "os": os, "pjoin": pjoin, "cond_means": means, "cond_ids": ids,
+          "tables": {"natural_images": pd.DataFrame({"roi_key": keys})},
+          "save_dir": tmp, "mouse_label": "M409828", "CONFIG": Cfg2(), "extra_outputs": []}
+    exec(compile(CSRC, "<condition-means>", "exec"), ns)
+    return ns
+
+
+class Cfg2:
+    trace_type = {"natural_images": "events"}
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    stdout = sys.stdout
+    sys.stdout = open(os.devnull, "w")
+    try:
+        ns = crun(*cmake(), tmp=tmp)
+    finally:
+        sys.stdout.close()
+        sys.stdout = stdout
+    path = pjoin(tmp, "condition_means_M409828.npz")
+    check("the archive is written", os.path.isfile(path))
+    d = np.load(path, allow_pickle=True)
+    n_rois = N_PLANES * N_ROIS_PER
+    check("ni_mean is (n_rois, n_images)", d["ni_mean"].shape == (n_rois, N_IMG),
+          str(d["ni_mean"].shape))
+    check("ni12_mean is (n_rois, 12)", d["ni12_mean"].shape == (n_rois, N_IMG12),
+          str(d["ni12_mean"].shape))
+    check("natural movie is deliberately absent",
+          not any(k.startswith("nm") for k in d.files), str(d.files))
+    check("image ids travel with each matrix",
+          len(d["ni_images"]) == N_IMG and len(d["ni12_images"]) == N_IMG12)
+    check("ni12 image ids are a sparse subset of the 118-image namespace, not 0..11",
+          bool(d["ni12_images"].max() > N_IMG12), str(d["ni12_images"][:4]))
+    check("roi_key spans the ROI axis", len(d["roi_key"]) == n_rois)
+    check("stored as float32", d["ni_mean"].dtype == np.float32)
+    check("the writer registers itself for the manifest and provenance",
+          ns["extra_outputs"] == ["condition_means_M409828.npz"])
+    d.close()
+
+
+def crefuses(label, **kw):
+    with tempfile.TemporaryDirectory() as tmp:
+        stdout = sys.stdout
+        sys.stdout = open(os.devnull, "w")
+        try:
+            crun(*cmake(**kw), tmp=tmp)
+            raised = None
+        except AssertionError as exc:
+            raised = str(exc)
+        except Exception as exc:                                        # noqa: BLE001
+            raised = f"{type(exc).__name__}: {exc}"
+        finally:
+            sys.stdout.close()
+            sys.stdout = stdout
+    check(label, raised is not None, (raised or "nothing raised")[:92])
+
+
+crefuses("planes disagreeing on image count are refused", widths=[N_IMG, N_IMG, 90])
+crefuses("an ROI count that disagrees with the table is refused", short_roi_key=True)
+crefuses("image ids that do not match the matrix width are refused", ids_short=True)
+
 summary()

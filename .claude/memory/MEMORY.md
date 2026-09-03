@@ -6,5 +6,6 @@
 - [V1DD metrics refactor decisions](v1dd-metrics-refactor-decisions.md) — the pipeline/validation split: all sessions, correct the known defects, mouse from the NWB.
 - [V1DD stimulus-metrics port status](v1dd-stimulus-metrics-port-status.md) — complete; the milestone record and the two-seed control methodology.
 - [Response windows: match now, tune later](response-window-deferred-tuning.md) — recovered values (DG 2.0 s, NI 0.33 s) and why windows behave as discrete sample counts.
+- [Population sparseness from the condition means](population-sparseness-from-condition-means.md) — the formula, the two readings of the paper definition, and why it is not a shipped column.
 - [AIND metadata for derived assets](aind-metadata-for-derived-assets.md) — working recipe + aind-data-schema 2.8.1 gotchas; reuse for the next data asset.
 - [Code Ocean reproducible-run blockers](co-reproducible-run-blockers.md) — all three resolved for this pipeline; the CAVE one still open elsewhere.

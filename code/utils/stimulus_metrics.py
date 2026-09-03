@@ -1174,9 +1174,15 @@ def natural_images_metrics(
     The response window is `config.ni_response_seconds`. The original took it from an NWB
     `duration_sec` attribute that the current files no longer carry, so it is a recovered
     parameter rather than a known one — see the window probe in the notebook.
+
+    Returns `(metrics, (condition_means, image_ids))`, the same two-value shape
+    `receptive_field_metrics` uses. `condition_means` is `(n_rois, n_images)` trial-
+    averaged responses, or `None` when the stimulus is absent. `image_ids` matters:
+    `natural_images_12` draws from the same 118-image namespace, so its columns are a
+    sparse subset of 0..117 rather than 0..11.
     """
     if not len(trials):
-        return absent_frame(plane, ns_type, mouse)
+        return absent_frame(plane, ns_type, mouse), None
     rng = np.random.default_rng() if rng is None else rng
     traces = plane.traces[config.trace_type[ns_type]]
     window = (0.0, float(config.ni_response_seconds))
@@ -1236,7 +1242,11 @@ def natural_images_metrics(
     out["pref_img"] = pref_img
     out["pref_response"] = pref_response
     out["z_score"] = z_score
-    return out
+    # (n_rois, n_images) trial-mean responses, transposed to put ROIs on axis 0 like every
+    # other exported array. The published columns are all reductions of this; keeping it is
+    # what makes population-level analysis possible at all, since nothing else in the asset
+    # carries a neuron-by-condition matrix for the natural stimuli.
+    return out, (mean_resp.T.astype(np.float32), np.asarray(image_ids))
 
 
 # --------------------------------------------------------------- receptive fields
