@@ -1,8 +1,7 @@
 # Handoff — V1DD stimulus metrics
 
-Written 2026-08-31, updated 2026-09-01 after the second reproducible run. Carries context
-between sessions running in different places (desktop, Code Ocean, Claude Code on the
-web). Those environments clone this repo and see nothing of each other's machines, so
+Written 2026-08-31, updated 2026-09-02. Carries context between sessions running in
+different places (desktop, Code Ocean, Claude Code on the web). Those environments clone this repo and see nothing of each other's machines, so
 anything they need has to live here.
 
 **Read this first, then `.claude/memory/` for depth.** This file is the map; the memory
@@ -17,10 +16,13 @@ stimulus-analysis pipeline onto the published NWB assets. The original read a pr
 Isilon HDF5 tree that no longer exists; this reproduces its seven metric tables from the
 NWB-Zarr sessions mounted in Code Ocean.
 
-**The port is complete and has shipped two assets.** The 2026-09-01 run added the two
-data-capture items that were previously open (window geometry, per-cell RF maps) and the
-output-neutral speedup. What remains is response-window tuning, one more speedup, and
-**three provenance defects introduced by this run** — see [Open work](#open-work).
+**The port is complete and has shipped two assets**, the most recent on 2026-09-01.
+
+**A third run is due, and a lot has been added since the last one.** Everything under
+[Pending the next run](#pending-the-next-run) is implemented and unit-tested but **has
+never touched real data** — five new families' worth of columns, two new array archives,
+and a config flag. Treat those numbers as unverified until a run produces them. The
+2026-09-01 asset does not contain any of it.
 
 ---
 
@@ -60,7 +62,7 @@ code/
   utils/                       pipeline only; must NEVER import from code/validation/
     v1dd_nwb.py                the only file touching hdmf_zarr / NWBHDF5IO
     trial_responses.py         numpy-only response engine (prefix sums, bootstraps)
-    stimulus_metrics.py        the seven metric families + MetricConfig + OUTPUT_COLUMNS
+    stimulus_metrics.py        the metric families + MetricConfig + OUTPUT_COLUMNS
     provenance.py              jsonable / git_sha
     paths.py                   data-root resolution (shared with upstream)
   supplement/
@@ -71,7 +73,8 @@ code/
     V1DD Stimulus Metrics Validation.ipynb
     V1DD Preflight.ipynb
     preflight.py  compare.py  schema_report.py  diff_runs.py  checkpoints.py
-    tests/        17 files, ~448 checks, no pytest — run_all.py + a check() harness
+    probe_window_center.py   one-off: why two sessions record no aperture centre
+    tests/        18 files, 537 checks, no pytest — run_all.py + a check() harness
 results/409828_V1DD_stimulus_metrics_2026-08-16_19-40-03/   the shipped asset
 ```
 
@@ -106,9 +109,10 @@ Needs numpy/pandas, so it will not run in a bare environment. In the capsule:
 python code/validation/tests/run_all.py
 ```
 
-As of 2026-09-01 this reports **15 passed, 1 skipped, 1 failed — 451 checks**, and the
-failure is a defect in the test rather than in the pipeline (see Open work). Before it,
-16 passed + 1 skipped. `test_reference_tables.py` skips whenever the `data_frames` asset
+As of 2026-09-02 this reports **537 checks** across 18 files. In the capsule expect
+`test_entrypoint.py` to fail 2 checks that assert a git fallback in an environment with no
+`.git` — a defect in the test, listed under Open work — and `test_metadata.py` to pass
+where it skips locally. `test_reference_tables.py` skips whenever the `data_frames` asset
 is not attached — **skip is not failure**, and `harness.py` installs a `sys.excepthook`
 so `SkipTest -> exit 2` holds even at module scope.
 
@@ -275,9 +279,124 @@ drops the other silently, and the symptom is a shorter session list rather than 
 
 ---
 
+## Pending the next run
+
+### Before you launch — three things that will otherwise ship wrong
+
+All three are the provenance defects from the 2026-09-01 run, still unfixed, and the first
+has since gone stale as well.
+
+1. **`environment/Dockerfile` line 9 is malformed *and* out of date:**
+   ```dockerfile
+   ENV SWDB_CODE_VERSION = 17cacea5a61c6b596324d6911a879b15f3ed98c4
+   ```
+   Docker's legacy `ENV <key> <value>` form takes everything after the first space as the
+   value, so the variable becomes `"= 17cacea..."` — which is what `processing.json`
+   recorded last time. And `17cacea` now predates every change in this section. Fix both:
+   ```dockerfile
+   ENV SWDB_CODE_VERSION=50122f51fd866eec15e478c17f8ab40f41fba222
+   ```
+   No spaces around the `=`.
+2. **`utils/provenance.git_sha()` still shells out to git and never reads
+   `SWDB_CODE_VERSION`**, so `stimulus_metrics_provenance.json` will again ship
+   `git_sha: null` while `processing.json` carries a version. Give it the same
+   env-var-first ladder `metadata.py` has.
+3. **`test_entrypoint.py` will fail 2 checks in the capsule** — `resolves from git here`
+   and `looks like a full sha` assert a git fallback in the one environment that has no
+   `.git`. The validation notebook then prints "unit tests failed" over a clean asset.
+   Make both skip when `git rev-parse` finds no repository.
+
+### What is new
+
+Built and unit-tested 2026-09-02, **never run on real data**. The 2026-09-01 asset has
+none of it. Every number below is a schema promise, not an observation.
+
+Do them in **one rerun**, not several — each is a schema change and the run is ~5 h.
+
+### New columns
+
+| table | columns | notes |
+|---|---|---|
+| `natural_images`, `natural_images_12`, `natural_movie` | `reliability`, `reliability_dff` | mean pairwise between-trial correlation. **No threshold, no bootstrap** — the only responsiveness measure here that does not depend on a cut against a spontaneous null |
+| `surround_supression_index` | `dgw_rf_distance_on/off`, `dgw_rf_overlap_on/off` | how much of each RF the grating aperture covered. **Reported, never used to filter** |
+| **`roi_summary`** (new family) | `snr`, `signal_power`, `noise_power`, `run_frac`, `spont_run_frac`, `spont_rate`, `spont_rate_run`, `spont_rate_stat`, `run_mod_dgf`, `run_mod_dgw`, `run_mod_spont` | per-ROI measures not tied to any visual stimulus |
+
+`roi_summary` was briefly called `locomotion`; it was renamed once `snr` and `spont_rate`
+joined, because those are not about locomotion. Prefix `""` in the wide table.
+
+### New array archives
+
+Both alongside `rf_maps_M409828.npz`, both registering themselves in
+`provenance.outputs.arrays` and the manifest's missing-file check — **which `rf_maps`
+previously did not**, so that asset shipped a 6 MB file provenance never mentioned.
+
+- **`tuning_curves_M409828.npz`** — the full `(n_rois, 12, 2, 8)` per-trial grating
+  responses for both types, plus blank sweeps, von Mises parameters, and per-plane running
+  speeds. ~60 MiB raw. The published grating columns are six numbers standing in for 192;
+  this is what they were computed from, so `preferred_dir` and `osi` become checkable by
+  eye. `roi_key` joins to the wide table; `plane_key` is `roi_key` minus its trailing
+  `_{roi}` and indexes the running speeds, which have no ROI axis.
+- **`condition_means_M409828.npz`** — `ni_mean` (39,407 x 118) and `ni12_mean`
+  (39,407 x 12) trial-mean responses, with their image ids. ~20 MiB. Natural movie is
+  deliberately absent: (39,407 x 3,600) is ~541 MiB even after averaging. This is the
+  `(n_neurons, n_conditions)` matrix `functional_similarity.signal_correlation` expects
+  and previously had nothing to read. See
+  [[population-sparseness-from-condition-means]].
+
+### A knob to decide before launching
+
+**`MetricConfig.fit_all_sf`** (default `False`). `False` fits only the spatial frequency
+surround suppression reads — ~2x faster over a full run, and it changes no published
+column. But `tuning_curves` exports `dgw_params` / `dgf_params`, and under `False` the
+unread SF is **NaN by design, not by failed fit**.
+
+Set it `True` for a completeness run and expect roughly double the drifting-gratings time,
+which is ~96 % of the total. `REFERENCE_CONFIG` sets it `True` because the original fitted
+every SF, so a fast run now shows in `differs_from_reference_config` — see the count change
+below.
+
+### What to expect from the run
+
+- **`differs_from_reference_config` is 4 entries, not 3.** `fit_all_sf` joined the three
+  corrections. A run reporting 3 is either out of date or was a completeness run.
+- `diff_runs.py` against 2026-09-01 should show **only added columns**, with the existing
+  ones unmoved. Receptive fields now run **first** in the per-plane loop so their maps
+  exist when surround suppression is assembled; that reorder is numerically free because
+  `rng` is a factory returning a freshly seeded generator per family — but **confirm it
+  with the diff rather than trusting it**.
+- The two new archives and `rf_maps` must all appear in `provenance.outputs.arrays`.
+
+### Still open
+
+**`dgw_center_inferred`** is *not* built, deliberately. Two sessions (column 2 / volume 5,
+column 4 / volume 1) record no aperture centre, and imputing from the column median is
+justified only if the data genuinely lacks it. Run first:
+
+```bash
+python code/validation/probe_window_center.py
+```
+
+Read-only, seconds per session, writes `/scratch/window_center_probe.json`. It
+distinguishes: **(a)** the column is absent from the NWB stimulus table, **(b)** present
+but all NaN, or **(c)** values exist and `stimulus_trials` loses them. Only (a) and (b)
+justify imputation; **(c) is our bug**, and filling in would bury it. Column 3 / volume 3
+is the control — re-filtered the same day as column 4 / volume 1, yet it *does* carry a
+centre.
+
+If (a) or (b): fill from the column median — column 2 to azimuth -19.6 / elevation -10.0,
+column 4 to -15.4 / -16.4 — with a per-ROI `dgw_center_inferred` flag, and put the donor
+count and spread in provenance rather than in a column. Note column 2 / volume 2 sits
+0.2 deg off the rest of its column, so the position was re-entered per session rather than
+shared by construction; the median, not "the column's value", is the right fill.
+
+---
+
 ## Open work
 
-### 1. Three provenance defects from the 2026-09-01 run — fix before the next run
+### 1. Three provenance defects from the 2026-09-01 run — all still unfixed
+
+**Summarised as a pre-launch checklist under [Pending the next run](#pending-the-next-run);
+the detail and reasoning are here.**
 
 Every metric in this asset is fine. All three of these are *around* the numbers, and all
 three are the same failure class as last time: **a check that runs in a different shape
@@ -563,6 +682,7 @@ Start there when a section above is too terse:
 | `v1dd-metrics-speedups.md` | the profile and the two speedups |
 | `response-window-deferred-tuning.md` | recovered window values and the discrete-sample reasoning |
 | `aind-metadata-for-derived-assets.md` | the metadata recipe and aind-data-schema 2.8.1 gotchas |
+| `population-sparseness-from-condition-means.md` | how to compute it from the new condition-means archive, and why it is not a column |
 | `co-reproducible-run-blockers.md` | the three CO blockers; all resolved here, #2 open elsewhere |
 | `user-handles-commits.md` | the commit convention |
 
