@@ -259,7 +259,13 @@ suspecting the data.
 
 ---
 
-## The 2026-09-03 run — everything landed except the two array archives
+## The two runs of 2026-09-03 — the first lost its archives, the second is the asset
+
+**The current asset is `409828_V1DD_stimulus_metrics_2026-09-03_15-55-03`** (`eea6957`,
+wall 18,525 s = 5.1 h, 25 sessions, `failed_sessions` empty, `complete_asset` true). All
+**16 outputs** landed, including the three array archives and provenance. That is the run
+every number in this file is now measured against; read the rest of this section for what
+the earlier run of the same day cost, because the failure class it exposed is still open.
 
 The third reproducible run (`bc940fc`, results copied to
 `data/results-V1DD_stimulus_metrics_2026-09-03_06-45-25/`) computed **every metric
@@ -315,7 +321,7 @@ survive it, and that the recorded widths are the pre-pad ones. Trials, params an
 shapes still raise, because a disagreement there really would be a stimulus that ran
 differently.
 
-### One thing to decide before the rerun
+### One thing still to decide — the rerun did not settle it
 
 The failure class is not fixed, only this instance of it. **A raise in either array-writer
 cell still costs the whole run its provenance**, because provenance and the manifest run
@@ -325,6 +331,12 @@ wrapped — record the failure, print it loudly, carry on to provenance — woul
 this five-hour loss into one missing file and a `!!` line. Not done here: it changes the
 notebook's failure contract and `test_tuning_export.py` asserts against the current one,
 so it is your call.
+
+**The 15:55 rerun did not close this.** It succeeded, so both writer cells ran and
+`condition_means`'s three assertions finally saw real data and passed — but nothing about
+the contract changed. The next raise in either cell still forfeits provenance. What the
+successful run does give you is the evidence that the assertions are correct as written,
+which was the argument for leaving them un-wrapped.
 
 ---
 
@@ -379,7 +391,19 @@ hang rather than a shorter list.** Re-check the format mix before relying on eit
 
 ---
 
-## Pending the next run
+## The launch checklist, and how the 2026-09-03 15:55 run answered it
+
+**This section is now a record, not a to-do.** The run happened; each decision below is
+annotated with what was actually used, from `stimulus_metrics_provenance.json`. Keep it
+as the checklist for the *next* run — the questions do not change, only the answers.
+
+| decision | what the run used |
+|---|---|
+| Dockerfile SHA | `eea6957cb014edf4c5efd5f122e012a8af97082e`, and provenance carries it — the `ENV` defect is gone from the shipped asset |
+| `fit_all_sf` | **`false`** — the ~2x-faster path, so the unread SF's `dg{w,f}_params` are NaN by design in `tuning_curves` |
+| `impute_dgw_center` | **`true`** — 2,456 ROIs filled from their column median |
+| `data_frames` / `VALIDATION_SESSIONS` | **still not attached.** This remains the largest open gap in the asset's evidence, and it is still free to close. |
+| `differs_from_reference_config` | **5 entries**: `fit_all_sf`, `impute_dgw_center`, `ni_response_frames`, `pref_cond_fillna`, `rf_center_scale_bug` |
 
 ### Before you launch — the checklist
 
@@ -985,6 +1009,83 @@ Not worth it: preferred temporal frequency (undefined — the grating axes are t
 CCmax (their 0.25 s smoothing window is 1.5 samples at 6 Hz), and the decoding and
 Gabor-wavelet models, which belong in a notebook against the shipped arrays rather than in
 the metrics pipeline.
+
+---
+
+## Shared or duplicated? The inventory before the pipelines split
+
+The cell-cell correlation analysis stays a separate pipeline, by decision — see
+`Functional Data Cell-Cell Correlations.ipynb`. This section exists so that whichever one
+gets migrated first, it is clear which copy to adopt.
+
+**Nothing is shared today.** The correlations notebook imports **nothing** from
+`code/utils/` — it is self-contained, and every overlap below is a genuine second copy.
+That is not an accident to be tidied away carelessly: it is what let the notebook ship
+before `code/utils/` existed. But it means seven pieces have two implementations, and in
+three of them the copies have already drifted.
+
+| what | metrics pipeline | correlations notebook | adopt |
+|---|---|---|---|
+| open an NWB in either format | `v1dd_nwb.open_session`, plus a `session()` context manager | `session_io` (cell 1) | **utils.** Identical logic, but the notebook's returns the `io` and leaves closing to a `with`; the utils pair separates "give me the file" from "manage the handle", which is what a long loop needs. |
+| session discovery | `v1dd_nwb.find_sessions` | inline globs (cell 13) | **utils.** See the divergence note below. |
+| identify a session cheaply | `v1dd_nwb.peek_session` | `peek_session` (cell 13) — **same name** | **utils.** Diverged; see below. |
+| stimulus epoch blocks | `v1dd_nwb.epoch_table` | `get_epoch_table` (cell 19) | **utils.** Same function, same body, different name. |
+| data-root resolution | `paths.resolve_data_root`, `resolve_dataset_dir` | a `platform.system()` if/elif (cell 3) | **utils.** The notebook's honours `SWDB_DATA_ROOT` but hard-codes `/Volumes/Brain2026`, `E:/` and a `$USERNAME` placeholder that is not expanded. |
+| output location | `provenance.run_dir`, `run_stamp`, `latest_run` | a fixed `save_dir` name (cell 3) | **utils.** The notebook overwrites in place, so two runs are indistinguishable — no stamp, no provenance. |
+| frequency-domain SNR | `stimulus_metrics.spectral_snr` | `estimate_snr_white_noise_model` (cell 21) | **either, deliberately.** Same bands, same scaling, documented as *not* bit-identical — see below. |
+| pairwise correlation table | `functional_similarity.pairwise_similarity_table` | `session_correlation_table` (cell 30) | **see below — this one is backwards.** |
+
+**Genuinely unshared, one implementation each.** `v1dd_nwb.load_plane` → `PlaneData` is
+per-plane and exists only in the pipeline. `load_session_dff` (cell 18) interpolates every
+plane onto one reference timebase and exists only in the notebook. These are the two
+pipelines' defining data shapes, and neither should adopt the other's.
+
+### Three places the copies have drifted
+
+**1. `peek_session` parses the volume differently, and the notebook's is wrong in
+general.** The notebook does `int(pd.to_numeric(rois["volume"]))`; `v1dd_nwb` routes it
+through `_as_volume_str`, because **volumes are 1..9 and a..f**. On a hex volume the
+notebook's copy raises or coerces to NaN. **Latent, not active** — M409828 has volumes
+1-5 only — so this bites the first time the analysis runs on a mouse that has one.
+
+**2. Session discovery does not dedup.** The notebook takes `sorted(_zarr + _hdf5)`;
+`find_sessions` takes a `prefer` argument, because a session present in *both* formats
+must yield one path. The notebook would process it twice. Its combined
+`if not _zarr and not _hdf5` fallback is the correct form — the per-format `or` fallback
+that hangs is documented in `find_sessions` and the notebook never had it.
+
+**3. `spectral_snr` is a port, not a copy, and says so.** Its docstring records that the
+notebook interpolates every plane onto one reference timebase before the FFT while the
+pipeline runs per plane on its own timestamps: *"Expect agreement in distribution, not in
+the last digit."* Do **not** reconcile these by making one call the other — the difference
+is the timebase, which is the thing the two pipelines legitimately disagree about.
+
+### `functional_similarity.py` is the odd one out — adopt it *into* the notebook
+
+This is the one place the direction runs the other way. `functional_similarity.py` (220
+lines) was written to generalise `session_correlation_table`: same long output format, but
+the similarity measure is an argument, so cosine, Spearman, negative Euclidean and
+`signal_correlation` all work through one path.
+
+**The correlations notebook does not use it.** Its only consumers are the workshop
+notebooks (`Module_2b`), and `V1DD Stimulus Metrics.ipynb` mentions it only in a comment
+explaining why `condition_means` ships in the shape `signal_correlation` expects. So the
+generalisation exists, is unused by the analysis it generalises, and the original stayed
+in the notebook.
+
+The two are not interchangeable as written: `session_correlation_table` emits
+`column`/`volume`/`pre_plane`/`pre_roi`/`post_plane`/`post_roi`, while
+`pairwise_similarity_table` emits a single configurable id pair
+(`pre_pt_root_id`/`post_pt_root_id` by default) for merging against coregistration.
+Migrating means deciding which key the split-out pipeline carries — and the pipeline-side
+`roi_key` (`M409828_1_3_2_0`) is a third option that neither currently uses.
+
+### Why "adopt utils" is the default answer
+
+`code/utils/` is under test and the notebook copies are not: `test_v1dd_nwb.py` (47
+checks) and `test_find_sessions.py` (30 checks) cover exactly the functions duplicated
+above, including the mixed-format and hex-volume cases the notebook copies get wrong. A
+migration that reimplements rather than imports loses that.
 
 ---
 

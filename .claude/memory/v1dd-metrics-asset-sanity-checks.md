@@ -1,6 +1,6 @@
 ---
 name: v1dd-metrics-asset-sanity-checks
-description: "What to verify when a full stimulus-metrics run returns — expected numbers, the diff that should appear, and what each of the three reproducible runs exposed (2026-08-16, 2026-09-01, and the 2026-09-03 run that lost its array archives)."
+description: "What to verify when a full stimulus-metrics run returns — expected numbers, the diff that should appear, and what each of the four reproducible runs exposed (2026-08-16, 2026-09-01, the 2026-09-03 run that lost its array archives, and the 2026-09-03 15:55 rerun that is the current complete asset)."
 metadata: 
   node_type: memory
   type: project
@@ -15,7 +15,25 @@ tables with zero changed columns at `atol=0`. What it did *not* pass is in
 "What the first reproducible run got wrong" at the bottom; all three are fixed and none
 touches a metric.
 
-## The 2026-09-03 run: every metric right, the array archives lost
+## The 2026-09-03 15:55 rerun is the current asset — all 16 outputs
+
+`409828_V1DD_stimulus_metrics_2026-09-03_15-55-03`, `eea6957`, wall 18,525 s (5.1 h),
+25 sessions, `failed_sessions` empty, `complete_asset` true. `fit_all_sf=false`,
+`impute_dgw_center=true`, `differs_from_reference_config` **5 entries**. `data_frames`
+was **still not attached**, so the fidelity comparison and the seed-B floor remain
+unrun — the one open evidence gap.
+
+Archive shapes, now observed: `tuning_curves` **15 keys** including `dg{w,f}_running`
+`(150, 12, 2, 8)` — per-plane per-trial running speed, which is more than expected and is
+what makes several de Vries analyses post-hoc; `dg{w,f}_trials` `(39407, 12, 2, 8)`;
+`condition_means` `ni_mean (39407, 118)` and `ni12_mean (39407, 12)`; `rf_maps`
+`(39407, 2, 8, 14)`, **pre-threshold**, and thresholding it at `rf_frac_thresh` (0.25)
+reproduces `has_rf_on`/`has_rf_off` for **100 %** of ROIs.
+
+`condition_means`'s three assertions saw real data for the first time and passed. The
+failure class is unchanged though — see the last paragraph of this section.
+
+## The earlier 2026-09-03 run: every metric right, the array archives lost
 
 The third reproducible run (`bc940fc`) computed all eight families and then **raised in
 the tuning-curve writer cell**, which assumed every plane ran the same number of blank
@@ -26,7 +44,7 @@ CSVs at 39,407 rows, the wide feather at **39,407 x 81**, `rf_maps` at
 (39,407, 2, 8, 14). **Lost:** `tuning_curves`, `condition_means`,
 `stimulus_metrics_provenance.json` — and **not rebuildable from the partial outputs**,
 because they come from trial-level accumulators the CSVs are reductions of. A fourth run
-is the only route.
+was the only route, and it is the 15:55 run above.
 
 Every number in this file reproduced from the partial outputs. The new columns are
 therefore observed, not promised: `roi_summary` (11), the six `reliability` columns, the
@@ -48,7 +66,7 @@ still has three assertions no real data has tested.
 | per-family CSVs | 7, each 39,407 rows |
 | runtime | ~7.2 h (~2.2 min/plane; drifting gratings is 96 % of it) |
 | `complete_asset` | `true`, `failed_sessions` empty |
-| `differs_from_reference_config` | **exactly 4 entries** from 2026-09-02 (was 3) |
+| `differs_from_reference_config` | **exactly 5 entries** as of 2026-09-03 (4 from 2026-09-02, 3 before that) |
 
 ## The diff that should appear
 
@@ -134,7 +152,7 @@ from `17cacea`. **Every metric is fine; three new provenance defects, all the sa
 as last time — a check running in a different shape than production.**
 
 Shape confirmed: 25 sessions / 150 planes / **39,407 ROIs**, `complete_asset` true,
-`failed_sessions` empty, `differs_from_reference_config` exactly 3 (**4 from 2026-09-02**), integrity **57/57**,
+`failed_sessions` empty, `differs_from_reference_config` exactly 3 (**4 from 2026-09-02, 5 from 2026-09-03**), integrity **57/57**,
 low-confidence session still 1,038 invalid (its 512 non-null SSI rows are 1,550 - 1,038).
 Runtime **4.83 h** (17,400.6 s), down from 7.2 h after speedup 1. New in the asset:
 `rf_maps_M409828.npz` and `dgw_center_*`. `format` is now populated per session.

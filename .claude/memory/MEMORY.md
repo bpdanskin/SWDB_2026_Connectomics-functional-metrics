@@ -10,3 +10,4 @@
 - [Population sparseness from the condition means](population-sparseness-from-condition-means.md) — the formula, the two readings of the paper definition, and why it is not a shipped column.
 - [AIND metadata for derived assets](aind-metadata-for-derived-assets.md) — working recipe + aind-data-schema 2.8.1 gotchas; reuse for the next data asset.
 - [Code Ocean reproducible-run blockers](co-reproducible-run-blockers.md) — all three resolved for this pipeline; the CAVE one still open elsewhere.
+- [Cell-cell correlations stay separate](cell-cell-correlations-stay-separate.md) — decided 2026-09-03; where the duplicated-vs-shared inventory lives.

@@ -14,6 +14,13 @@ is a decision waiting on either evidence or the user.
 **Status update 2026-09-01:** Items 1 (grating-window geometry) and 3 (RF map export)
 are now implemented and ready for the next run. See details below.
 
+**Status update 2026-09-03:** both shipped — the
+`409828_V1DD_stimulus_metrics_2026-09-03_15-55-03` asset is complete, with all 16 outputs.
+Still open from this file: the response windows (unchanged), the 67 %-low-confidence
+session, and every "shipped deliberately" item. Newly settled: the lifetime-sparseness
+disagreement with de Vries turned out to be a **convention** difference, not a sampling
+one — see [[population-sparseness-from-condition-means]].
+
 ## Response windows were matched, not chosen
 
 The windows reproduce an earlier pipeline built for slow calcium transients; this one runs
@@ -182,7 +189,7 @@ capture rather than force a re-derivation later.
 * **`roi_key` is only in the wide feather**, not the per-family CSVs, which keep the
   historical column set. Anyone working from the CSVs alone has no unique per-ROI string
   and must join on `(column, volume, plane, roi)`. Adding it is a schema change and
-  another 7 h rerun.
+  another ~5 h rerun, so batch it with any other column change.
 * **`pref_img` for natural movie is approximate by construction.** The response window
   spans several frames and frames are 1/30 s apart, so activity from one frame lands in
   its neighbours' windows. Read it as "around here in the clip".
